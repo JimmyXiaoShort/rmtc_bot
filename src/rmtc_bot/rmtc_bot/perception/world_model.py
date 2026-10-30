@@ -143,11 +143,7 @@ class WorldModel:
         self.last_session = p.session_id
 
         if p.map_w and p.map_h:
-            changed = (p.map_w, p.map_h) != (self.map_w, self.map_h)
             self.map_w, self.map_h = p.map_w, p.map_h
-            # 地图尺寸变化（换轮到 20×20 / 24×24）时按「地图中心」重新标定堡垒
-            if changed and self.fortress is not None:
-                self.fortress.rebind_map(self.map_w, self.map_h)
         self.vision_radius = p.vision_radius
 
         if p.me is not None:

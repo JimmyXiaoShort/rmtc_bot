@@ -24,7 +24,7 @@
   (a) 每 Tick 回血量 / 累计上限        → 不假设，仅观测。
   (b) 原地 WAIT 是否累计驻留           → 默认「需成功移动」(fort_require_move)。
   (c) 50 Tick 生命周期的起算 Tick      → 默认「全程有效」(fort_lifetime_ticks=0 视为全程)。
-  (d) 堡垒具体坐标                     → 默认 [11,11]–[13,13]（来源：选手提供的赛场信息）。
+  (d) 堡垒具体坐标                     → 默认按感知地图中心自动居中（fort_auto_center）。
 """
 
 from __future__ import annotations
@@ -53,6 +53,7 @@ class FortressModel:
         self.y0 = int(getattr(cfg, "fort_y0", C.FORT_Y0_DEFAULT))
         self.y1 = int(getattr(cfg, "fort_y1", C.FORT_Y1_DEFAULT))
         self.auto_center = bool(getattr(cfg, "fort_auto_center", False))
+        self._map_dims: Tuple[int, int] = (0, 0)   # 已标定的地图尺寸（避免每 Tick 重算/刷日志）
         # 固定 3×3（选手提供赛场信息：[11,11]–[13,13] 共 9 格）
         self.cells: List[XY] = C.fortress_cells(self.x0, self.x1, self.y0, self.y1)
         self.cell_set: Set[XY] = set(self.cells)
@@ -75,12 +76,16 @@ class FortressModel:
     # 场次 / 地图标定
     # ------------------------------------------------------------------
     def rebind_map(self, map_w: int, map_h: int) -> None:
-        """按实际地图尺寸重新标定（仅当开启自动居中；默认使用固定 9 格）。
+        """按实际地图尺寸重新标定（仅当开启自动居中）。
 
         不硬编码 20×20 / 24×24：尺寸来自本队感知的 map 字段。
+        仅在尺寸变化时重算，避免每 Tick 重复计算与日志刷屏。
         """
         if not self.auto_center or map_w <= 0 or map_h <= 0:
             return
+        if (map_w, map_h) == self._map_dims:
+            return
+        self._map_dims = (map_w, map_h)
         cells = C.center_3x3_cells(map_w, map_h)
         self.cells = cells
         self.cell_set = set(cells)
@@ -130,13 +135,13 @@ class FortressModel:
           不满足 → 清空未完成进度（离开/死亡/未成功移动）。
         """
         me = p.me
+        if p.map_w and p.map_h:
+            self.rebind_map(p.map_w, p.map_h)
+
         if me is None:
             self.inside = False
             self.streak = 0
             return
-
-        if p.map_w and p.map_h:
-            self.rebind_map(p.map_w, p.map_h)
 
         alive = bool(me.alive) and me.respawn_in == 0
         self.inside = alive and self.contains(me.position)
