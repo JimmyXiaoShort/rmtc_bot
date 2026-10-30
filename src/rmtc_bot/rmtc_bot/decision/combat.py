@@ -38,6 +38,8 @@ _DIR_VEC = {
     "right": (1, 0),
 }
 
+_DIR_VEC_OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
+
 
 def _enemy_near(p: Perception) -> Optional[object]:
     """返回视野内最近的存活敌车（RobotEntity 或 None）。"""
@@ -85,30 +87,73 @@ def _attack_direction(p: Perception, enemy) -> Optional[str]:
     return "down" if dy > 0 else "up"
 
 
-def _move_toward(p: Perception, target) -> str:
-    """朝目标走一格（返回方向）；优先长轴。"""
+def _free_step(wm: WorldModel, src, direction: str) -> bool:
+    """该方向下一格是否为本地已知可达格（界内且非已知障碍）。"""
+    dx, dy = _DIR_VEC[direction]
+    return wm.is_free((src[0] + dx, src[1] + dy))
+
+
+def _candidates_toward(p: Perception, target) -> list:
+    """朝目标的候选方向序列：主轴 → 次轴 → 其余方向（确定性）。"""
     me = p.me
     assert me is not None and me.position is not None
     dx = target[0] - me.position[0]
     dy = target[1] - me.position[1]
-    if abs(dx) >= abs(dy):
-        return "right" if dx > 0 else ("left" if dx < 0 else ("down" if dy > 0 else "up"))
-    return "down" if dy > 0 else ("up" if dy < 0 else ("right" if dx > 0 else "left"))
+    horiz = "right" if dx > 0 else ("left" if dx < 0 else None)
+    vert = "down" if dy > 0 else ("up" if dy < 0 else None)
+    primary = horiz if abs(dx) >= abs(dy) else vert
+    secondary = vert if primary == horiz else horiz
+    out = [d for d in (primary, secondary) if d is not None]
+    for d in ("up", "down", "left", "right"):
+        if d not in out:
+            out.append(d)
+    return out
 
 
-def _flee_direction(p: Perception) -> str:
-    """撤离方向：远离最近敌人；无敌人返回 'up'（保守原地靠边）。"""
+def _step_toward(p: Perception, wm: WorldModel, target) -> Optional[str]:
+    """
+    朝目标走一格，避开已知障碍与边界，并尽量不原路折返。
+
+    返回 None 表示四方向均被封死（调用方退化为 WAIT / DEFEND）。
+    """
+    me = p.me
+    assert me is not None and me.position is not None
+    cands = _candidates_toward(p, target)
+    la = me.last_action
+    last = la.effective_direction if (la is not None and la.moved) else None
+    if last is not None:
+        rev = _DIR_VEC_OPPOSITE.get(last)
+        if rev in cands:
+            cands.remove(rev)
+            cands.append(rev)
+    for d in cands:
+        if _free_step(wm, me.position, d):
+            return d
+    return None
+
+
+def _flee_direction(p: Perception, wm: WorldModel) -> Optional[str]:
+    """撤离方向：远离最近敌人；无敌人时选任一可达方向。全被封死返回 None。"""
     me = p.me
     if me is None or me.position is None:
-        return "up"
+        return None
     enemy = _enemy_near(p)
-    if enemy is None or enemy.position is None:
-        return "up"
-    dx = me.position[0] - enemy.position[0]
-    dy = me.position[1] - enemy.position[1]
-    if abs(dx) >= abs(dy):
-        return "right" if dx > 0 else "left"
-    return "down" if dy > 0 else "up"
+    cands = []
+    if enemy is not None and enemy.position is not None:
+        dx = me.position[0] - enemy.position[0]
+        dy = me.position[1] - enemy.position[1]
+        horiz = "right" if dx > 0 else ("left" if dx < 0 else None)
+        vert = "down" if dy > 0 else ("up" if dy < 0 else None)
+        primary = horiz if abs(dx) >= abs(dy) else vert
+        secondary = vert if primary == horiz else horiz
+        cands = [d for d in (primary, secondary) if d is not None]
+    for d in ("up", "down", "left", "right"):
+        if d not in cands:
+            cands.append(d)
+    for d in cands:
+        if _free_step(wm, me.position, d):
+            return d
+    return None
 
 
 def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
@@ -121,29 +166,42 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     enemy = _enemy_near(p)
     hp = me.hp
 
+    # 站上资源格即视为已采集：从记忆移除，避免 patrol 反复瞄准脚下已空资源
+    if me.position in wm.resources:
+        wm.mark_resource_collected(me.position)
+
     # ---- 1) 残血 / safe 模式 → 优先 DEFEND 或撤离 ----
     if (not safe_mode and hp <= _FLEE_HP) or (safe_mode and hp <= _SAFE_MODE_HP):
         if enemy is not None and _line_of_fire(p, enemy):
             return Intent(kind="defend", reason=f"flee-hp({hp})")
-        return Intent(kind="move", direction=_flee_direction(p), reason=f"flee-hp({hp})")
+        d = _flee_direction(p, wm)
+        if d is not None:
+            return Intent(kind="move", direction=d, reason=f"flee-hp({hp})")
+        return Intent(kind="defend", reason=f"flee-blocked({hp})")
 
     # ---- 2) 交战逻辑 ----
     if enemy is not None and _line_of_fire(p, enemy):
         # 出生保护中的攻击者不能 ATTACK（规则 §6.2）
         if me.protected:
-            return Intent(kind="move", direction=_flee_direction(p), reason="protected-no-attack")
+            d = _flee_direction(p, wm)
+            if d is not None:
+                return Intent(kind="move", direction=d, reason="protected-no-attack")
+            return Intent(kind="defend", reason="protected-no-attack")
         return Intent(kind="attack", direction=_attack_direction(p, enemy), reason="engage")
 
     # ---- 3) 追敌 / 游走 ----
     if enemy is not None:
-        return Intent(kind="move", direction=_move_toward(p, enemy.position), reason="chase")
+        d = _step_toward(p, wm, enemy.position)
+        if d is not None:
+            return Intent(kind="move", direction=d, reason="chase")
+        return Intent(kind="wait", reason="chase-blocked")
 
     # ---- 4) 无敌人 → 探索 / 任务点 / 游走 ----
     return _patrol(p, wm)
 
 
 def _patrol(p: Perception, wm: WorldModel) -> Intent:
-    """无敌人时的游走：向最近未完成任务点（若有）或地图中心扫荡。"""
+    """无敌人时的游走：未完成任务点 → 已知资源 → 地图中心。"""
     me = p.me
     assert me is not None and me.position is not None
     target = None
@@ -154,5 +212,12 @@ def _patrol(p: Perception, wm: WorldModel) -> Intent:
                 (abs(target[0] - me.position[0]) + abs(target[1] - me.position[1])):
             target = (tx, ty)
     if target is None:
+        res = wm.nearest_resource(me.position, high_first=True)
+        if res is not None and res.position is not None:
+            target = res.position
+    if target is None:
         target = (p.map_w // 2, p.map_h // 2)
-    return Intent(kind="move", direction=_move_toward(p, target), reason="patrol")
+    d = _step_toward(p, wm, target)
+    if d is None:
+        return Intent(kind="wait", reason="patrol-blocked")
+    return Intent(kind="move", direction=d, reason="patrol")

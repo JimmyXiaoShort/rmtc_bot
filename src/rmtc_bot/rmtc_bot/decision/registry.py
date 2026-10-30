@@ -29,12 +29,11 @@ def infer_stage(p: Perception) -> int:
 
     优先使用 parser 已推断的 p.stage（按 tick / 视野内机器人）；
     兜底：第二阶段动作 Tick 为 0–499，第一阶段 0–99；tick ≥ 100 时必然是第二阶段。
+    注意：地图尺寸不能区分阶段（本站 stage1/stage2 地图都是 24×24），不得用于判阶段。
     """
     if p.stage in (1, 2):
         return p.stage
     if p.tick >= 100:
-        return 2
-    if p.map_w >= 24 or p.map_h >= 24:
         return 2
     if p.robots:
         return 2
@@ -47,12 +46,14 @@ def _strategy_collect(p: Perception, ctx: "DecisionContext") -> Intent:
 
 
 def _strategy_combat(p: Perception, ctx: "DecisionContext") -> Intent:
-    """decision_type=combat：强制第二阶段对抗策略。"""
+    """decision_type=combat：第一阶段先采集（无对手可见），第二阶段强制对抗。"""
+    if infer_stage(p) == 1:
+        return decide_collect(p, ctx)
     return decide_combat(p, ctx)
 
 
 def _strategy_auto(p: Perception, ctx: "DecisionContext") -> Intent:
-    """decision_type=auto：按 tick / 地图 / 视野自动判定阶段。"""
+    """decision_type=auto：按 tick / 视野自动判定阶段。"""
     stage = infer_stage(p)
     if stage == 1:
         return decide_collect(p, ctx)
@@ -63,14 +64,15 @@ def _strategy_safe(p: Perception, ctx: "DecisionContext") -> Intent:
     """
     decision_type=safe：保守/降级模式。
 
-    不主动交战：有视野内敌人则优先脱离，否则就近采集；残血时优先撤离。
-    用于异常状态或应急降级（仍受动作合法性与阶段白名单约束）。
+    第一阶段无对手可见 → 就近采集；第二阶段不主动交战：
+    有视野内敌人则优先脱离，残血时优先撤离（仍受动作合法性与阶段白名单约束）。
     """
     # 延迟导入避免循环依赖
     from .combat import decide_combat
 
-    intent = decide_combat(p, ctx, safe_mode=True)
-    return intent
+    if infer_stage(p) == 1:
+        return decide_collect(p, ctx)
+    return decide_combat(p, ctx, safe_mode=True)
 
 
 # decision_type → 策略入口（与 config.DECISION_TYPE_REGISTRY 一一对应）

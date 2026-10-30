@@ -72,19 +72,21 @@ DECISION_TYPE_REGISTRY: Dict[str, Dict[str, str]] = {
         "detail": "贪心最近资源搜索 + 已知障碍规避；不发送 attack/defend。",
     },
     "combat": {
-        "stage": "2",
+        "stage": "1/2",
         "summary": "第二阶段资源争夺 + 任务 + 对抗 + 事件响应",
-        "detail": "资源优先、任务导向、按血量/视野威胁决定攻击或防御，事件经 LLM 理解。",
+        "detail": "第一阶段（无对手可见）自动转入资源采集；第二阶段资源优先、任务导向、"
+                   "按血量/视野威胁决定攻击或防御，已知障碍规避，事件经 LLM 理解。",
     },
     "auto": {
         "stage": "1/2",
         "summary": "自动判定阶段（默认）",
-        "detail": "按 tick 范围、地图尺寸与视野内实体推断阶段，再分派到 collect / combat。",
+        "detail": "按 tick 范围与视野内实体推断阶段，再分派到 collect / combat。",
     },
     "safe": {
-        "stage": "2",
+        "stage": "1/2",
         "summary": "保守/降级模式",
-        "detail": "不主动交战，优先脱离威胁、就近采集与保命；用于异常或应急降级。",
+        "detail": "第一阶段就近采集；第二阶段不主动交战，优先脱离威胁、残血撤离；"
+                   "用于异常或应急降级。",
     },
 }
 

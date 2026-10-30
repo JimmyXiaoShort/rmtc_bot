@@ -138,6 +138,9 @@ def decide_fortress(p: Perception, ctx) -> Optional[Intent]:
         d = _step_dir(me.position, tgt)
         if d is None:
             return None
+        nx, ny = me.position[0] + _DIR_VEC[d][0], me.position[1] + _DIR_VEC[d][1]
+        if not wm.is_free((nx, ny)):
+            return None   # 直线被已知障碍挡住 → 交回常规策略绕行
         return Intent(kind="move", direction=d, reason=f"fort-retreat({hp})", target=tgt)
 
     # ---------- 2) 敌车占据堡垒 ----------
@@ -152,7 +155,9 @@ def decide_fortress(p: Perception, ctx) -> Optional[Intent]:
             tgt = fort.nearest_cell(me.position)
             d = _step_dir(me.position, tgt)
             if d is not None:
-                return Intent(kind="move", direction=d, reason="fort-contest", target=tgt)
+                nx, ny = me.position[0] + _DIR_VEC[d][0], me.position[1] + _DIR_VEC[d][1]
+                if wm.is_free((nx, ny)):
+                    return Intent(kind="move", direction=d, reason="fort-contest", target=tgt)
         return None
 
     # ---------- 3) 驻留累计中（未达标）→ 在堡垒内巡航 ----------
