@@ -43,7 +43,7 @@ PARAM_ENV_DEFAULTS: Dict[str, tuple] = {
     "fort_x1": ("RMTC_FORT_X1", str(C.FORT_X1_DEFAULT)),
     "fort_y0": ("RMTC_FORT_Y0", str(C.FORT_Y0_DEFAULT)),
     "fort_y1": ("RMTC_FORT_Y1", str(C.FORT_Y1_DEFAULT)),
-    "fort_auto_center": ("RMTC_FORT_AUTO_CENTER", "0"),
+    "fort_auto_center": ("RMTC_FORT_AUTO_CENTER", "1"),
     "fort_require_move": ("RMTC_FORT_REQUIRE_MOVE", "1"),
     "fort_retreat_hp": ("RMTC_FORT_RETREAT_HP", str(C.FORT_RETREAT_HP_DEFAULT)),
     "fort_resume_hp": ("RMTC_FORT_RESUME_HP", str(C.FORT_RESUME_HP_DEFAULT)),
@@ -152,7 +152,7 @@ class Config:
     fort_x1: int = C.FORT_X1_DEFAULT
     fort_y0: int = C.FORT_Y0_DEFAULT
     fort_y1: int = C.FORT_Y1_DEFAULT
-    fort_auto_center: bool = False        # True=按实际地图尺寸自动居中 3×3
+    fort_auto_center: bool = True         # True=按实际地图尺寸自动居中 3×3（规则「地图中心」）
     fort_lifetime_ticks: int = C.FORT_LIFETIME_TICKS
     fort_residence_ticks: int = C.FORT_RESIDENCE_TICKS
     fort_require_move: bool = True        # 是否必须成功移动才累计驻留（原文未明确）
@@ -296,7 +296,7 @@ def load_config(decision_config_path: Optional[str] = None,
         fort_x1=_to_int(_pick(params, "fort_x1", "RMTC_FORT_X1", str(C.FORT_X1_DEFAULT)), C.FORT_X1_DEFAULT),
         fort_y0=_to_int(_pick(params, "fort_y0", "RMTC_FORT_Y0", str(C.FORT_Y0_DEFAULT)), C.FORT_Y0_DEFAULT),
         fort_y1=_to_int(_pick(params, "fort_y1", "RMTC_FORT_Y1", str(C.FORT_Y1_DEFAULT)), C.FORT_Y1_DEFAULT),
-        fort_auto_center=_to_bool(_pick(params, "fort_auto_center", "RMTC_FORT_AUTO_CENTER", "0"), False),
+        fort_auto_center=_to_bool(_pick(params, "fort_auto_center", "RMTC_FORT_AUTO_CENTER", "1"), True),
         fort_require_move=_to_bool(_pick(params, "fort_require_move", "RMTC_FORT_REQUIRE_MOVE", "1"), True),
         fort_retreat_hp=_to_int(_pick(params, "fort_retreat_hp", "RMTC_FORT_RETREAT_HP",
                                       str(C.FORT_RETREAT_HP_DEFAULT)), C.FORT_RETREAT_HP_DEFAULT),

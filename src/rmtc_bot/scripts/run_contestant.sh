@@ -10,7 +10,8 @@
 #       ros_domain_id:=<赛前公布值>
 #
 # 不传的参数由 launch 文件回退到环境变量 / 内置默认值。
-# 现场只允许修改 config/decision_config.json 的 decision_type 字段。
+# 现场只允许修改 decision_type：在工作区根放置 decision_config.json 即可，
+# 启动时优先读取当前目录的该文件（见 docs/赛事工作人员启动与联调说明.md）。
 # ============================================================================
 set -euo pipefail
 

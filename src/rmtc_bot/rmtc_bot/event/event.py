@@ -5,14 +5,14 @@
 职责：
 - 监听 /referee/event_text 与 /referee/mission（均为纯文本公告，协议第 2 节）；
 - 事件文本交给 LLM 网关解析（openai 兼容），得到结构化动作建议；
-- 纯任务提示（reach 型任务由感知 missions 结构化给出坐标）不进 LLM（省配额）；
+- 任务公告只记录日志：坐标等结构化任务由感知 missions 字段提供，不占 LLM 配额
+  （全局上限 100 次 / 500 Tick，配额优先留给随机事件）；
 - 事件窗口内（有建议且未消费）由 FSM 优先叠加执行。
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from dataclasses import dataclass
 from typing import Optional
@@ -22,10 +22,6 @@ from ..perception.world_model import WorldModel
 from ..decision.registry import DecisionContext  # noqa: F401  (类型标注)
 
 log = logging.getLogger("rmtc.event")
-
-# 纯规则可识别事件（无需 LLM）：任务提示
-_TASK_KEYWORDS = ("任务", "mission", "目标", "坐标", "计分")
-_ACTION_KEYWORDS = ("攻击", "撤离", "防守", "defend", "attack", "flee", "move", "wait")
 
 
 @dataclass
@@ -57,19 +53,14 @@ class EventPolicy:
     def on_mission_text(self, text: str, tick: int) -> None:
         """处理 /referee/mission（纯文本任务公告）。
 
-        任务坐标的权威来源是感知中的 missions 字段（结构化），本方法只做
-        规则提示记录；涉及指令性语义（如"前往 (x,y)"）由 LLM 分支处理。
-        裁判会每 Tick 重发同一任务文本，故按内容去重，避免重复消耗 LLM 配额。
+        任务坐标的权威来源是感知中的 missions 字段（结构化），本方法只记录日志。
+        裁判会每 Tick 重发同一任务文本，按内容去重后仅记录，不再调用 LLM。
         """
         t = text.strip()
         if not t or t == self._last_mission_text:
             return
         self._last_mission_text = t
         log.info("任务公告[tick=%s]: %s", tick, t)
-        if any(k in t for k in _TASK_KEYWORDS):
-            self._llm_parse_async(t, tick)   # 让 LLM 提取可执行意图（到达/守卫等）
-        else:
-            log.info("任务公告无可执行意图，仅记录")
 
     def on_event_text(self, text: str, tick: int) -> None:
         """处理 /referee/event_text（纯文本随机事件公告）。"""

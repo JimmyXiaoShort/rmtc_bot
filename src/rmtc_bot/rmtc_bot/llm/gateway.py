@@ -82,7 +82,7 @@ def _repair_json(text: str) -> str:
 
 
 _SYSTEM_PROMPT = (
-    "你是 RMTC 机甲对战机器人的事件解析器。裁判会给你一段中文事件/任务公告，"
+    "你是 RMTC 机甲对战机器人的事件解析器。裁判会给你一段中文事件公告，"
     "你要判断它此刻最合适的立即动作。\n"
     "输出要求：只输出一个 json 对象，不要 Markdown 代码块，不要任何解释文字。\n"
     "字段（仅这三个）：\n"
@@ -144,7 +144,8 @@ class LLMGateway:
             rate=float(c.get("qps", 8.0)),          # 本地远低于每 IP 100/10s
             capacity=float(c.get("burst", 16)),
         )
-        # 本地软配额（赛前公告为准；0 不限制）
+        # 本地软配额（赛前公告为准；0 不限制）。按 HTTP POST 次数计数，
+        # 重试与失败请求同样占用额度，保证总调用不超过公告上限。
         self.soft_quota = int(c.get("soft_quota", 0))
         self._used = 0
         if self.enabled:
@@ -160,14 +161,10 @@ class LLMGateway:
             log.warning("LLM 本地限频，跳过本次解析")
             return None
         with self._lock:
-            if self.soft_quota > 0 and self._used >= self.soft_quota:
-                log.warning("LLM 软配额已用尽(%s)，降级", self.soft_quota)
-                return None
             if self._inflight >= 2:   # 每令牌最多 2 个在途
                 log.warning("LLM 在途调用已达上限(2)，跳过")
                 return None
             self._inflight += 1
-            self._used += 1
         try:
             content = self._chat(text)
         finally:
@@ -197,10 +194,20 @@ class LLMGateway:
             payload["response_format"] = {"type": "json_object"}
         return payload
 
-    @staticmethod
-    def _post(url: str, headers: Dict[str, str], payload: Dict[str, Any],
+    def _reserve_call(self) -> bool:
+        """预占一次调用额度；达到上限返回 False（含重试在内统一计数）。"""
+        with self._lock:
+            if self.soft_quota > 0 and self._used >= self.soft_quota:
+                log.warning("LLM 调用已达上限(%s)，降级", self.soft_quota)
+                return False
+            self._used += 1
+            return True
+
+    def _post(self, url: str, headers: Dict[str, str], payload: Dict[str, Any],
               timeout: float) -> Any:
         """发送一次请求：返回 requests.Response；连接/读取异常返回 None。"""
+        if not self._reserve_call():
+            return None
         try:
             return requests.post(url, json=payload, headers=headers, timeout=timeout)
         except Exception as exc:  # 连接/读取异常：降级，不重试
