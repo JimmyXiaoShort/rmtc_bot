@@ -140,8 +140,9 @@ def main() -> int:
         print("!! 期望 attack，实际", i2)
 
     # 情况 3：第二阶段低血(-堡垒)，本车 (8,12)、堡垒 [11..13]x[11..13] → 期望朝右移动
+    # tick 取 120（≥100）以确保按第二阶段解析：地图尺寸不能区分阶段。
     raw3 = perception(
-        stage=2, tick=80, session="self-3", self_xy=(8, 12), hp=20,
+        stage=2, tick=120, session="self-3", self_xy=(8, 12), hp=20,
         entities=[], map_wh=(24, 24),
     )
     p3, i3, m3 = run_case("情况3 第二阶段·低血回撤堡垒", raw3)

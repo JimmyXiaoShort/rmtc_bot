@@ -27,7 +27,7 @@ def infer_stage(p: Perception) -> int:
     """
     阶段推断（不依赖缓存）。
 
-    优先使用 parser 已推断的 p.stage（按 tick / 地图尺寸 / 视野内实体）；
+    优先使用 parser 已推断的 p.stage（按 tick / 视野内机器人）；
     兜底：第二阶段动作 Tick 为 0–499，第一阶段 0–99；tick ≥ 100 时必然是第二阶段。
     """
     if p.stage in (1, 2):

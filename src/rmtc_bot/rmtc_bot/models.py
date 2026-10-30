@@ -111,7 +111,7 @@ class Perception:
     tick: int
     session_id: str
     vision_radius: int = 0
-    stage: int = 1                    # 1=第一阶段，2=第二阶段（由 parser 按 tick/地图尺寸推断）
+    stage: int = 1                    # 1=第一阶段，2=第二阶段（由 parser 按 tick/视野内机器人推断）
     me: Optional[SelfState] = None
     robots: List[RobotEntity] = field(default_factory=list)
     resources: List[ResourceEntity] = field(default_factory=list)

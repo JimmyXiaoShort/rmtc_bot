@@ -67,6 +67,14 @@ def _best_direction(p: Perception, wm: WorldModel) -> str:
             continue
 
         cost = 0.0
+        # 无已知资源时的探索偏好：越靠近地图中心代价越低。
+        # 第一阶段高价值资源通常位于中心区域；该偏好只影响「扫描」，
+        # 一旦发现资源仍由上方 nearest_resource 贪心追击接管。
+        if p.map_w > 0 and p.map_h > 0:
+            cx, cy = p.map_w // 2, p.map_h // 2
+            if (cx, cy) not in wm.visited:
+                cost += 0.6 * (abs(nx - cx) + abs(ny - cy))
+
         for r in p.robots:
             if r.position is None:
                 continue

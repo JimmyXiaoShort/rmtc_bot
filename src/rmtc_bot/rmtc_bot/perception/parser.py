@@ -288,13 +288,12 @@ def parse_perception(raw: str) -> Perception:
     map_h = _as_int(mp.get("height"), 0) or 0
 
     # ---- 阶段推断（规则第 3 节） ----
-    # 第一阶段动作 Tick 0–99、地图 20×20、无随机事件、视野内无其他机器人；
-    # 第二阶段动作 Tick 0–499。tick >= 100 时必为第二阶段。
-    if tick >= 100:
-        stage = 2
-    elif map_w >= 24 or map_h >= 24:
-        stage = 2
-    elif robots:
+    # 第一阶段动作 Tick 0–99，第二阶段 500 Tick。
+    # 注意：地图尺寸不能区分阶段（本站 stage1/stage2 地图都是 24×24）；
+    # 视野内出现机器人可判定第二阶段；tick ≥ 100 时第一阶段已结束，必为第二阶段。
+    # 保守取舍：tick < 100 且未见机器人时按第一阶段处理（只发 MOVE/WAIT），
+    # 避免在真正的第一阶段误发 ATTACK/DEFEND 造成无效动作扣分。
+    if tick >= 100 or robots:
         stage = 2
     else:
         stage = 1
