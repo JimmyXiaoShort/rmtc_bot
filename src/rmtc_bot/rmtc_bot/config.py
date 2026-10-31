@@ -46,7 +46,6 @@ PARAM_ENV_DEFAULTS: Dict[str, tuple] = {
     "fort_auto_center": ("RMTC_FORT_AUTO_CENTER", "1"),
     "fort_require_move": ("RMTC_FORT_REQUIRE_MOVE", "1"),
     "fort_retreat_hp": ("RMTC_FORT_RETREAT_HP", str(C.FORT_RETREAT_HP_DEFAULT)),
-    "fort_resume_hp": ("RMTC_FORT_RESUME_HP", str(C.FORT_RESUME_HP_DEFAULT)),
     "fort_enemy_policy": ("RMTC_FORT_ENEMY_POLICY", C.FORT_ENEMY_POLICY_DEFAULT),
 }
 
@@ -159,7 +158,6 @@ class Config:
     fort_residence_ticks: int = C.FORT_RESIDENCE_TICKS
     fort_require_move: bool = True        # 是否必须成功移动才累计驻留（原文未明确）
     fort_retreat_hp: int = C.FORT_RETREAT_HP_DEFAULT
-    fort_resume_hp: int = C.FORT_RESUME_HP_DEFAULT
     fort_enemy_policy: str = C.FORT_ENEMY_POLICY_DEFAULT
     fort_heal_per_tick: Optional[int] = None   # 原文未明确：不假设，None=不推断
 
@@ -175,14 +173,6 @@ class Config:
     @property
     def registration_topic(self) -> str:
         return C.TOPIC_REGISTRATION_FMT.format(seat=self.seat)
-
-    @property
-    def chat_url(self) -> str:
-        return self.gateway.rstrip("/") + C.LLM_CHAT_PATH
-
-    @property
-    def health_url(self) -> str:
-        return self.gateway.rstrip("/") + C.LLM_HEALTH_PATH
 
 
 def _read_decision_type(path: str) -> str:
@@ -302,8 +292,6 @@ def load_config(decision_config_path: Optional[str] = None,
         fort_require_move=_to_bool(_pick(params, "fort_require_move", "RMTC_FORT_REQUIRE_MOVE", "1"), True),
         fort_retreat_hp=_to_int(_pick(params, "fort_retreat_hp", "RMTC_FORT_RETREAT_HP",
                                       str(C.FORT_RETREAT_HP_DEFAULT)), C.FORT_RETREAT_HP_DEFAULT),
-        fort_resume_hp=_to_int(_pick(params, "fort_resume_hp", "RMTC_FORT_RESUME_HP",
-                                     str(C.FORT_RESUME_HP_DEFAULT)), C.FORT_RESUME_HP_DEFAULT),
         fort_enemy_policy=(
             (_pick(params, "fort_enemy_policy", "RMTC_FORT_ENEMY_POLICY",
                    C.FORT_ENEMY_POLICY_DEFAULT) or C.FORT_ENEMY_POLICY_DEFAULT).strip().lower()

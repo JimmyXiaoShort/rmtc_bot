@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict
 
 from ..models import Intent, Perception
 from .collector import decide_collect

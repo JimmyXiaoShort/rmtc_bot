@@ -110,9 +110,6 @@ class FortressModel:
         """返回堡垒 9 格中距 xy 曼哈顿最近的格（并列取序号最小，保证确定性）。"""
         return min(self.cells, key=lambda c: (manhattan(xy, c), c[1], c[0]))
 
-    def distance(self, xy: XY) -> int:
-        return manhattan(xy, self.nearest_cell(xy))
-
     def is_active(self, tick: int) -> bool:
         """堡垒是否仍在有效期。
 
@@ -180,15 +177,8 @@ class FortressModel:
     # ------------------------------------------------------------------
     # 决策辅助
     # ------------------------------------------------------------------
-    @property
-    def residence_ready(self) -> bool:
-        return self.buff_granted or self.streak >= self.need
-
     def retreat_hp(self) -> int:
         return int(getattr(self.cfg, "fort_retreat_hp", C.FORT_RETREAT_HP_DEFAULT))
-
-    def resume_hp(self) -> int:
-        return int(getattr(self.cfg, "fort_resume_hp", C.FORT_RESUME_HP_DEFAULT))
 
     def next_cell(self, from_xy: XY) -> XY:
         """在当前格之外挑一个堡垒格作为下一步目标（用于「在堡垒内巡航累计驻留」）。

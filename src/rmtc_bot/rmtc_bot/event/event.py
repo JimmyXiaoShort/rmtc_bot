@@ -19,7 +19,6 @@ from typing import Optional
 
 from ..models import Intent, Perception
 from ..perception.world_model import WorldModel
-from ..decision.registry import DecisionContext  # noqa: F401  (类型标注)
 
 log = logging.getLogger("rmtc.event")
 

@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from ..models import Intent, Perception
 from ..perception.world_model import WorldModel

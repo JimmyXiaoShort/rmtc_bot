@@ -39,7 +39,6 @@ _PARAMS = (
     ("fort_auto_center", "RMTC_FORT_AUTO_CENTER", "1", "1=按实际地图尺寸自动居中 3×3"),
     ("fort_require_move", "RMTC_FORT_REQUIRE_MOVE", "1", "1=必须成功移动才累计驻留"),
     ("fort_retreat_hp", "RMTC_FORT_RETREAT_HP", "40", "低于该血量撤离堡垒"),
-    ("fort_resume_hp", "RMTC_FORT_RESUME_HP", "70", "回到该血量以上再来驻留"),
     ("fort_enemy_policy", "RMTC_FORT_ENEMY_POLICY", "strike", "堡垒遇敌策略（strike/contest/avoid）"),
 )
 
