@@ -169,8 +169,19 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     if me.position in wm.resources:
         wm.mark_resource_collected(me.position)
 
-    # ---- 1) 残血 / safe 模式 → 优先 DEFEND 或撤离 ----
-    if (not safe_mode and hp <= _FLEE_HP) or (safe_mode and hp <= _SAFE_MODE_HP):
+    # ---- 1) 残血 / safe 模式 → 优先撤离或 DEFEND ----
+    # safe 模式语义是「优先脱离威胁」（见 registry._strategy_safe 文档）：
+    # 先尝试撤离；仅当四方向都被已知障碍/边界封死时才 DEFEND。
+    # 若像普通模式那样「敌在射程线内就先 DEFEND」，两台残血 safe 车贴脸会互相
+    # 防御、永不移动，形成长期僵持（本地两阶段仿真中曾出现 180 Tick 冻结）。
+    if safe_mode and hp <= _SAFE_MODE_HP:
+        d = _flee_direction(p, wm)
+        if d is not None:
+            return Intent(kind="move", direction=d, reason=f"safe-flee({hp})")
+        return Intent(kind="defend", reason=f"safe-corned({hp})")
+
+    # 普通模式残血：贴脸（敌在射程线内）先 DEFEND 抵消伤害，否则撤离
+    if hp <= _FLEE_HP:
         if enemy is not None and _line_of_fire(p, enemy):
             return Intent(kind="defend", reason=f"flee-hp({hp})")
         d = _flee_direction(p, wm)
