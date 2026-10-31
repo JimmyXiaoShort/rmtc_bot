@@ -74,6 +74,9 @@ class WorldModel:
         self.last_processed_tick: int = -1
         self.last_session: Optional[str] = None
 
+        # 裁判下发的无效动作计数（仅用于自检告警）
+        self.last_invalid_actions: int = 0
+
     # ------------------------------------------------------------------
     # 场次管理
     # ------------------------------------------------------------------
@@ -112,6 +115,7 @@ class WorldModel:
 
         self.last_processed_tick = -1
         self.last_session = None
+        self.last_invalid_actions = 0
 
     def reset(self) -> None:
         """等价于 reset_for_session 的便捷入口（不带参数）。"""
@@ -151,6 +155,12 @@ class WorldModel:
             self.self_hp = p.me.hp
             self.alive = p.me.alive
             self.visited.add(p.me.position)
+
+        # 无效动作自检：裁判计 invalid_actions 递增说明本队在发非法动作，必须告警
+        if p.score is not None and p.score.invalid_actions > self.last_invalid_actions:
+            log.warning("无效动作计数上升：%d -> %d（tick=%s），请检查动作合法性",
+                        self.last_invalid_actions, p.score.invalid_actions, p.tick)
+            self.last_invalid_actions = p.score.invalid_actions
 
         # 障碍：静态记忆，需按 TTL 清理（临时障碍视为长期，事件到期由事件策略处理）
         for ob in p.obstacles:

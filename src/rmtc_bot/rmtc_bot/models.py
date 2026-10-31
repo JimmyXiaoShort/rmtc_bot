@@ -85,12 +85,12 @@ class Obstacle:
 
 @dataclass
 class Score:
-    """score.*：本队累计计分字段。"""
+    """score.*：仅保留裁判下发的无效动作计数，作为最后一道自检信号。
 
-    resource_value: int = 0
-    effective_damage: float = 0.0    # 实际攻击伤害 + 击杀奖励 − 死亡扣除，最低 0，可下降、可超 500
-    mission_completed: int = 0
-    mission_completed_ids: List[str] = field(default_factory=list)
+    其余累计分（resource_value / effective_damage / mission_completed）不参与决策：
+    资源、伤害、任务进度均由视野内实体直接感知，无需裁判汇总分。
+    """
+
     invalid_actions: int = 0
 
 
