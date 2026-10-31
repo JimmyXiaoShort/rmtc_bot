@@ -16,10 +16,11 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import Optional
 
 from ..models import Intent, Perception
-from ..perception.world_model import WorldModel
+from ..perception.world_model import WorldModel, manhattan
 
 log = logging.getLogger("rmtc.strategy.combat")
 
@@ -28,6 +29,7 @@ _ENGAGE_RANGE = 2      # 攻击射程（直线 1–2 格；已进入射程即开
 _SCAN_RANGE = 4        # 索敌扫描半径（视野内 ±4 格）
 _FLEE_HP = 15          # HP 低于该值强制撤离
 _SAFE_MODE_HP = 40     # safe 模式触发撤离的 HP 阈值
+_RETREAT_RADIUS = 8    # 撤离目标搜索半径（只找附近安全格，避免跨全图逃跑）
 
 # 方向 → 位移（规则 §4.1：x 向右、y 向下）
 _DIR_VEC = {
@@ -36,8 +38,6 @@ _DIR_VEC = {
     "left": (-1, 0),
     "right": (1, 0),
 }
-
-_DIR_VEC_OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
 
 def _enemy_near(p: Perception) -> Optional[object]:
@@ -92,15 +92,23 @@ def _free_step(wm: WorldModel, src, direction: str) -> bool:
     return wm.is_free((src[0] + dx, src[1] + dy))
 
 
-def _candidates_toward(p: Perception, target) -> list:
-    """朝目标的候选方向序列：主轴 → 次轴 → 其余方向（确定性）。"""
+def _candidates_toward(p: Perception, target, axis_pref: Optional[str] = None) -> list:
+    """朝目标的候选方向序列：主轴 → 次轴 → 其余方向（确定性）。
+
+    axis_pref 仅用于“正对角线”平局时打破对称：两台车同时追击且 |dx|==|dy| 时，
+    若都按同一确定性规则选水平轴，会互相镜像绕圈（永不进入攻击线）。调用方
+    按 robot_id 比较给出不同 axis_pref，使双方选不同轴，从而逼近到攻击线。
+    """
     me = p.me
     assert me is not None and me.position is not None
     dx = target[0] - me.position[0]
     dy = target[1] - me.position[1]
     horiz = "right" if dx > 0 else ("left" if dx < 0 else None)
     vert = "down" if dy > 0 else ("up" if dy < 0 else None)
-    primary = horiz if abs(dx) >= abs(dy) else vert
+    if abs(dx) == abs(dy) and dx != 0 and dy != 0 and axis_pref == "vertical":
+        primary = vert
+    else:
+        primary = horiz if abs(dx) >= abs(dy) else vert
     secondary = vert if primary == horiz else horiz
     out = [d for d in (primary, secondary) if d is not None]
     for d in ("up", "down", "left", "right"):
@@ -109,26 +117,97 @@ def _candidates_toward(p: Perception, target) -> list:
     return out
 
 
-def _step_toward(p: Perception, wm: WorldModel, target) -> Optional[str]:
+def _step_toward(p: Perception, wm: WorldModel, target,
+                 axis_pref: Optional[str] = None) -> Optional[str]:
     """
-    朝目标走一格，避开已知障碍与边界，并尽量不原路折返。
+    朝目标走一格：在已知栅格上取 BFS 最短路的第一步。
 
-    返回 None 表示四方向均被封死（调用方退化为 WAIT / DEFEND）。
+    axis_pref 只影响「多条等长最短路」时的枚举顺序（用于打破斜对角镜像追击）。
+    返回 None 表示已在目标或当前已知信息下不可达（调用方退化为 WAIT / DEFEND）。
     """
     me = p.me
     assert me is not None and me.position is not None
-    cands = _candidates_toward(p, target)
-    la = me.last_action
-    last = la.effective_direction if (la is not None and la.moved) else None
-    if last is not None:
-        rev = _DIR_VEC_OPPOSITE.get(last)
-        if rev in cands:
-            cands.remove(rev)
-            cands.append(rev)
-    for d in cands:
-        if _free_step(wm, me.position, d):
-            return d
-    return None
+    order = _candidates_toward(p, target, axis_pref)
+    return wm.next_step(me.position, tuple(target), order)
+
+
+def _nearest_known_enemy(p: Perception, wm: WorldModel):
+    """返回世界模型记忆中的最近敌车（含已离开视野但未过 TTL 的）。
+
+    safe 模式用它而不是当前感知，利用记忆 TTL 形成「迟滞」：敌车在 4 格视野
+    边缘忽隐忽现时，若只按当前感知判断，会出现「撤离/任务」逐 Tick 交替的
+    2 格振荡（本地仿真 B 席曾卡 345 Tick）。
+    """
+    me = p.me
+    if me is None or me.position is None:
+        return None
+    best, best_d = None, float("inf")
+    for e in wm.enemies.values():
+        if e.position is None:
+            continue
+        d = manhattan(me.position, e.position)
+        if d < best_d:
+            best, best_d = e, d
+    return best
+
+
+def _retreat_step(p: Perception, wm: WorldModel, enemy) -> Optional[str]:
+    """朝「离敌更远」的可达格撤离一格（BFS 评估，避免贪心在凹槽里来回）。
+
+    做法：从自身做一次 BFS 得到所有可达格及其路径长度，选出「比当前位置离敌
+    至少远 2 格」的目标格（同等安全时取路径最短者），再沿最短路走第一步。
+
+    为什么不能继续用「一步贪心远离」：被障碍夹住时，贪心会选一个方向后退，
+    下一 Tick 又因障碍被挤回来，形成永久 2 格振荡（本地仿真 safe 模式曾各席
+    卡约 365 Tick）。BFS 保证每一步都确实把「离敌距离」变大，或明确不可撤。
+    """
+    me = p.me
+    if me is None or me.position is None or enemy is None or enemy.position is None:
+        return None
+    src = me.position
+    if wm.map_w <= 0 or wm.map_h <= 0:
+        return _flee_direction(p, wm)   # 地图尺寸未知时退回旧的保守逻辑
+    exy = enemy.position
+    cur_safety = abs(src[0] - exy[0]) + abs(src[1] - exy[1])
+
+    prev = {}
+    dist = {src: 0}
+    queue = deque([src])
+    while queue:
+        cur = queue.popleft()
+        if dist[cur] >= _RETREAT_RADIUS:
+            continue
+        for d, (dx, dy) in _DIR_VEC.items():
+            nx = (cur[0] + dx, cur[1] + dy)
+            if nx in dist or not wm.is_free(nx):
+                continue
+            dist[nx] = dist[cur] + 1
+            prev[nx] = (cur, d)
+            queue.append(nx)
+
+    best, best_key = None, None
+    # 远离方向（相对于敌车的轴向符号）：用于在等距安全格之间优先「沿远离轴」
+    ax = (src[0] > exy[0]) - (src[0] < exy[0])
+    ay = (src[1] > exy[1]) - (src[1] < exy[1])
+    for cell in dist:
+        if cell == src:
+            continue
+        safety = abs(cell[0] - exy[0]) + abs(cell[1] - exy[1])
+        if safety < cur_safety + 2:
+            continue
+        # 先选最近的格，再优先沿「远离敌人」的轴向移动，最后看安全度。
+        # 只按安全度选会让两台互逃的车上演「同速平行逃跑 / 贴墙上下摆动」。
+        proj = ax * (cell[0] - src[0]) + ay * (cell[1] - src[1])
+        key = (-dist[cell], proj, safety)
+        if best_key is None or key > best_key:
+            best, best_key = cell, key
+    if best is None:
+        return None     # 已退到当前可达范围内的最安全位置 → 交由调用方 DEFEND
+
+    cur = best
+    while prev[cur][0] != src:
+        cur = prev[cur][0]
+    return prev[cur][1]
 
 
 def _flee_direction(p: Perception, wm: WorldModel) -> Optional[str]:
@@ -155,6 +234,21 @@ def _flee_direction(p: Perception, wm: WorldModel) -> Optional[str]:
     return None
 
 
+def _diag_axis_preference(p: Perception, enemy) -> Optional[str]:
+    """正对角线追击时的分轴偏好：按 robot_id 字典序，保证两台车选不同轴。
+
+    若两台车都按同一规则选水平轴，会在斜对角上互相镜像绕圈（永不进入攻击线）。
+    """
+    me = p.me
+    if me is None or enemy is None:
+        return None
+    my_id = str(me.robot_id or me.team or "")
+    en_id = str(getattr(enemy, "robot_id", None) or getattr(enemy, "id", "") or "")
+    if not my_id or not en_id or my_id == en_id:
+        return None
+    return "vertical" if my_id < en_id else "horizontal"
+
+
 def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     """阶段二决策入口：MOVE / ATTACK / DEFEND / WAIT。"""
     wm: WorldModel = ctx.world
@@ -171,23 +265,44 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
     # ---- 1) 残血 / safe 模式 → 优先撤离或 DEFEND ----
     # safe 模式语义是「优先脱离威胁」（见 registry._strategy_safe 文档）：
-    # 先尝试撤离；仅当四方向都被已知障碍/边界封死时才 DEFEND。
-    # 若像普通模式那样「敌在射程线内就先 DEFEND」，两台残血 safe 车贴脸会互相
-    # 防御、永不移动，形成长期僵持（本地两阶段仿真中曾出现 180 Tick 冻结）。
+    # 视野内有敌车就撤离，绝不主动追击；脱开视野后继续做任务/巡逻。
+    # 注意不要「只在近身时逃、稍远就追」——两台低血车会陷入
+    # 「拉开 3 格→追回去」的往复（本地仿真中 chase+safe-flee 占满 500 Tick）。
     if safe_mode and hp <= _SAFE_MODE_HP:
-        d = _flee_direction(p, wm)
-        if d is not None:
-            return Intent(kind="move", direction=d, reason=f"safe-flee({hp})")
-        return Intent(kind="defend", reason=f"safe-corned({hp})")
+        threat = enemy if enemy is not None else _nearest_known_enemy(p, wm)
+        if threat is not None:
+            d = _retreat_step(p, wm, threat)
+            if d is not None:
+                return Intent(kind="move", direction=d, reason=f"safe-flee({hp})")
+            # 退无可退时若双方都在 DEFEND 且血量不变 → 互相僵持，转为开火打破
+            la = me.last_action
+            if (enemy is not None and _line_of_fire(p, enemy) and la is not None
+                    and la.action == "defend" and wm.prev_hp == hp):
+                return Intent(kind="attack", direction=_attack_direction(p, enemy),
+                              reason=f"engage-break({hp})")
+            return Intent(kind="defend", reason=f"safe-corned({hp})")
 
     # 普通模式残血：贴脸（敌在射程线内）先 DEFEND 抵消伤害，否则撤离
-    if hp <= _FLEE_HP:
+    if not safe_mode and hp <= _FLEE_HP:
         if enemy is not None and _line_of_fire(p, enemy):
+            la = me.last_action
+            # 上一 Tick 已 DEFEND 且血量未变 → 对手大概率也在防御（互相僵持），
+            # 继续 DEFEND 没有任何进展。此时撤离风险低（对方未开火），尝试脱离；
+            # 若已退无可退，则转为攻击：对防御目标能造成 10 HP 伤害。
+            if (la is not None and la.action == "defend"
+                    and wm.prev_hp == hp):
+                d = _retreat_step(p, wm, enemy)
+                if d is not None:
+                    return Intent(kind="move", direction=d, reason=f"flee-break({hp})")
+                return Intent(kind="attack", direction=_attack_direction(p, enemy),
+                              reason=f"engage-break({hp})")
             return Intent(kind="defend", reason=f"flee-hp({hp})")
-        d = _flee_direction(p, wm)
-        if d is not None:
-            return Intent(kind="move", direction=d, reason=f"flee-hp({hp})")
-        return Intent(kind="defend", reason=f"flee-blocked({hp})")
+        if enemy is not None:
+            d = _retreat_step(p, wm, enemy)
+            if d is not None:
+                return Intent(kind="move", direction=d, reason=f"flee-hp({hp})")
+            return Intent(kind="defend", reason=f"flee-blocked({hp})")
+        # 无近敌 → 继续常规任务/巡逻（不为了看不见的敌人原地打转）
 
     # ---- 2) 交战逻辑 ----
     if enemy is not None and _line_of_fire(p, enemy):
@@ -201,7 +316,8 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
     # ---- 3) 追敌 / 游走 ----
     if enemy is not None:
-        d = _step_toward(p, wm, enemy.position)
+        d = _step_toward(p, wm, enemy.position,
+                         axis_pref=_diag_axis_preference(p, enemy))
         if d is not None:
             return Intent(kind="move", direction=d, reason="chase")
         return Intent(kind="wait", reason="chase-blocked")
@@ -227,6 +343,9 @@ def _patrol(p: Perception, wm: WorldModel) -> Intent:
             target = res.position
     if target is None:
         target = (p.map_w // 2, p.map_h // 2)
+    # 已经站在游走目标上：原地等待，避免「离开一格又回来」的 2 格永久振荡
+    if target == me.position:
+        return Intent(kind="wait", reason="at-target")
     d = _step_toward(p, wm, target)
     if d is None:
         return Intent(kind="wait", reason="patrol-blocked")

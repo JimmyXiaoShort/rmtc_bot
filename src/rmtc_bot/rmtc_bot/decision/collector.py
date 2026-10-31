@@ -104,29 +104,6 @@ def _best_direction(p: Perception, wm: WorldModel) -> str:
     return best_dir
 
 
-def _move_toward(src_xy, dst_xy):
-    """按曼哈顿距离选一个推进方向；同距离时优先水平再垂直（与动作枚举一致）。"""
-    sx, sy = src_xy
-    dx, dy = dst_xy[0] - sx, dst_xy[1] - sy
-    if abs(dx) >= abs(dy):
-        if dx > 0:
-            return "right"
-        if dx < 0:
-            return "left"
-        if dy > 0:
-            return "down"
-        if dy < 0:
-            return "up"
-        return None
-    if dy > 0:
-        return "down"
-    if dy < 0:
-        return "up"
-    if dx > 0:
-        return "right"
-    return "left"
-
-
 def decide_collect(p: Perception, ctx) -> Intent:
     """阶段一决策入口：输出 MOVE 或 WAIT。"""
     wm: WorldModel = ctx.world
@@ -144,15 +121,13 @@ def decide_collect(p: Perception, ctx) -> Intent:
     if p.map_w > 0 and p.map_h > 0 and len(wm.visited) >= p.map_w * p.map_h:
         return Intent(kind="wait", reason="all-visited")
 
-    # 优先：追已知最近资源（贪心，价值/距离权衡）
+    # 优先：追已知最近资源（贪心，价值/距离权衡）；路径用 BFS 求，避免在凹槽/死角绕圈
     target = wm.nearest_resource(me.position, high_first=True)
     if target is not None and target.position is not None:
-        d = _move_toward(me.position, target.position)
-        # 追击方向被已知障碍挡住 → 交给扫描逻辑绕行，避免撞墙浪费 Tick
+        d = wm.next_step(me.position, target.position)
+        # 已知障碍下不可达 → 交给扫描逻辑继续探索（不产生撞墙动作）
         if d is not None:
-            dx, dy = _DIR_VEC[d]
-            if not wm.is_obstacle((me.position[0] + dx, me.position[1] + dy)):
-                return Intent(kind="move", direction=d, reason="chase-resource")
+            return Intent(kind="move", direction=d, reason="chase-resource")
 
     # 兜底：无已知资源 → 覆盖式扫描
     d = _best_direction(p, wm)

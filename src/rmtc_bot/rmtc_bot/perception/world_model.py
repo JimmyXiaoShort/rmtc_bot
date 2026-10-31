@@ -48,6 +48,7 @@ class WorldModel:
         self.map_h: int = 0
         self.self_pos: XY = (0, 0)
         self.self_hp: int = C.HP_MAX
+        self.prev_hp: int = C.HP_MAX               # 上一 Tick 血量（用于识别互防僵局）
         self.alive: bool = True
         self.vision_radius: int = C.VISION_RADIUS_MAX
 
@@ -82,6 +83,7 @@ class WorldModel:
         self.map_h = 0
         self.self_pos = (0, 0)
         self.self_hp = C.HP_MAX
+        self.prev_hp = C.HP_MAX
         self.alive = True
         self.vision_radius = C.VISION_RADIUS_MAX
 
@@ -116,6 +118,7 @@ class WorldModel:
 
         if p.me is not None:
             self.self_pos = p.me.position
+            self.prev_hp = self.self_hp
             self.self_hp = p.me.hp
             self.alive = p.me.alive
             self.visited.add(p.me.position)
@@ -194,6 +197,44 @@ class WorldModel:
     def is_free(self, xy: XY) -> bool:
         """本地碰撞预判：在界内且非已知障碍。"""
         return self.in_bounds(xy) and not self.is_obstacle(xy)
+
+    def next_step(self, src: XY, dst: XY, order=None) -> Optional[str]:
+        """在已知栅格上求 src→dst 最短路的第一步方向（BFS）。
+
+        只用「已知障碍 + 地图边界」作为不可走格，未知格按可走处理（与感知一致）。
+        返回 None 表示：已在目标、地图尺寸未知、或当前已知信息下不可达。
+
+        为什么不能只做一步贪心：目标方向被障碍挡住时，贪心每一步都只挑「当下
+        最接近目标」的方向，会绕着一个凹槽/死角反复打转（本地仿真曾出现 4~6 格
+        的长周期绕圈，表现是长期追击却几乎打不到人）。BFS 保证只要存在通路就
+        沿最短路推进，从结构上消除这类循环。
+        """
+        if src == dst or self.map_w <= 0 or self.map_h <= 0:
+            return None
+        dirs = order if order else ("up", "down", "left", "right")
+        step_vec = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
+        prev: Dict[XY, Tuple[XY, str]] = {}
+        queue = deque([src])
+        seen = {src}
+        found = False
+        while queue:
+            cur = queue.popleft()
+            if cur == dst:
+                found = True
+                break
+            for d in dirs:
+                nx = (cur[0] + step_vec[d][0], cur[1] + step_vec[d][1])
+                if nx in seen or not self.is_free(nx):
+                    continue
+                seen.add(nx)
+                prev[nx] = (cur, d)
+                queue.append(nx)
+        if not found:
+            return None
+        cur = dst
+        while prev[cur][0] != src:
+            cur = prev[cur][0]
+        return prev[cur][1]
 
     def nearest_resource(self, from_xy: XY, high_first: bool = True) -> Optional[ResourceEntity]:
         """返回「价值 / 距离」最优的资源；高价值优先由其价值体现。"""
