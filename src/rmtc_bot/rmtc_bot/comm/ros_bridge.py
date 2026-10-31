@@ -8,9 +8,9 @@ ROS 2 rclpy 的订阅者 / 发布者。若团队本地另用 MQTT 做调试旁�
 只能作为内部通道，不得接入比赛接口。
 
 QoS 严格对齐协议第 2 节：
-    感知、动作           RELIABLE / VOLATILE        / KEEP_LAST(1)
-    注册、任务、队伍名录 RELIABLE / TRANSIENT_LOCAL / KEEP_LAST(1)
-    事件公告             RELIABLE / TRANSIENT_LOCAL / KEEP_LAST(128)
+    感知、动作       RELIABLE / VOLATILE        / KEEP_LAST(1)
+    注册、任务       RELIABLE / TRANSIENT_LOCAL / KEEP_LAST(1)
+    事件公告         RELIABLE / TRANSIENT_LOCAL / KEEP_LAST(128)
 
 设计要点：
 - 订阅回调只做「保存最新」，不做业务处理，避免阻塞 DDS 回调线程；
@@ -23,13 +23,11 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from collections import deque
 from typing import Deque, List, Optional
 
 try:  # ROS 2 运行期导入；单元测试环境可无 rclpy
     import rclpy
-    from rclpy.node import Node
     from rclpy.qos import (
         DurabilityPolicy,
         HistoryPolicy,
@@ -41,7 +39,6 @@ try:  # ROS 2 运行期导入；单元测试环境可无 rclpy
     _ROS_AVAILABLE = True
 except Exception:  # pragma: no cover - 无 ROS 环境
     rclpy = None  # type: ignore
-    Node = object  # type: ignore
     String = None  # type: ignore
     _ROS_AVAILABLE = False
 
@@ -73,7 +70,7 @@ def build_qos_perception_action() -> QoSProfile:
 
 
 def build_qos_registry_mission() -> QoSProfile:
-    """注册 / 任务 / 队伍名录 QoS：RELIABLE、TRANSIENT_LOCAL、KEEP_LAST(1)。"""
+    """注册 / 任务 QoS：RELIABLE、TRANSIENT_LOCAL、KEEP_LAST(1)。"""
     return QoSProfile(
         reliability=ReliabilityPolicy.RELIABLE,
         durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -111,9 +108,6 @@ class RosBridge:
         self._latest_perception: Optional[str] = None
         self._event_queue: Deque[str] = deque(maxlen=512)
         self._mission_text: str = ""
-        self._registry_raw: str = ""
-        self._last_perception_rx: float = 0.0
-        self._perception_rx_count: int = 0
 
         # ---- 发布者 ----
         self.pub_action = self.node.create_publisher(
@@ -133,9 +127,6 @@ class RosBridge:
         self.node.create_subscription(
             String, C.TOPIC_MISSION, self._on_mission, build_qos_registry_mission()
         )
-        self.node.create_subscription(
-            String, C.TOPIC_TEAM_REGISTRY, self._on_registry, build_qos_registry_mission()
-        )
 
         # 注册消息定期重发（协议第 2 节：注册发布者须保持运行）
         self._reg_timer = self.node.create_timer(5.0, self.publish_registration)
@@ -154,8 +145,6 @@ class RosBridge:
     def _on_perception(self, msg) -> None:
         with self._lock:
             self._latest_perception = msg.data
-            self._last_perception_rx = time.time()
-            self._perception_rx_count += 1
 
     def _on_event(self, msg) -> None:
         with self._lock:
@@ -166,10 +155,6 @@ class RosBridge:
             # /referee/mission 为纯文本任务公告（协议第 2 节：任务与随机事件公告 data 为纯文本）
             self._mission_text = msg.data
 
-    def _on_registry(self, msg) -> None:
-        with self._lock:
-            self._registry_raw = msg.data
-
     # ------------------------------------------------------------------
     # 供主循环调用的访问接口
     # ------------------------------------------------------------------
@@ -178,13 +163,6 @@ class RosBridge:
         with self._lock:
             data, self._latest_perception = self._latest_perception, None
             return data
-
-    def peek_perception_stats(self) -> dict:
-        with self._lock:
-            return {
-                "rx_count": self._perception_rx_count,
-                "last_rx_ts": self._last_perception_rx,
-            }
 
     def drain_events(self) -> List[str]:
         """取走全部待处理事件公告原文。"""
@@ -198,10 +176,6 @@ class RosBridge:
         with self._lock:
             data, self._mission_text = self._mission_text, ""
             return data
-
-    def registry_raw(self) -> str:
-        with self._lock:
-            return self._registry_raw
 
     # ------------------------------------------------------------------
     # 发布
@@ -230,24 +204,3 @@ class RosBridge:
         except Exception as exc:
             log.error("发布动作失败：%s", exc)
             return False
-
-    # ------------------------------------------------------------------
-    # 断线重连 / 健康检查
-    # ------------------------------------------------------------------
-    def perception_age_s(self) -> float:
-        """返回距最近一次收到感知的秒数；用于断线检测。"""
-        with self._lock:
-            if self._last_perception_rx <= 0:
-                return float("inf")
-            return time.time() - self._last_perception_rx
-
-    def is_link_alive(self, timeout_s: float = 3.0) -> bool:
-        """感知链路是否仍在活动（超过 timeout_s 未收到感知视为断链）。"""
-        return self.perception_age_s() <= timeout_s
-
-
-def spin_for(node: Node, seconds: float, step: float = 0.02) -> None:
-    """在给定时间内持续 spin（用于等待/重连）。"""
-    deadline = time.time() + seconds
-    while time.time() < deadline and rclpy.ok():
-        rclpy.spin_once(node, timeout_sec=step)

@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 from .. import constants as C
 from ..models import (
-    EventAdvice,
     Obstacle,
     Perception,
     ResourceEntity,
@@ -57,22 +56,12 @@ class WorldModel:
         self.resources: Dict[XY, ResourceEntity] = {}
         self.enemies: Dict[str, RobotEntity] = {}      # 以 robot_id 为键
         self.visited: Set[XY] = set()                  # 本车已到过的格（用于探索）
-        self.harvested: Dict[XY, bool] = {}           # 已采集/已到过的格（阶段一采集进度）
-        self.killed_enemies: Dict[str, int] = {}      # 击杀奖励不可重复获得：已击杀目标计数（v1.1）
         self.mission_points: Set[XY] = set()           # 任务坐标（来自感知 missions 的 reach 型）
         self.mission_done: Dict[XY, bool] = {}         # 任务坐标是否已完成
         self.event_log: deque = deque(maxlen=200)      # 本场事件公告原文（含去重）
-        self.event_advices: List[EventAdvice] = []     # LLM 结构化理解结果
-
-        # 侦察记忆：已探明为「无障碍/无资源」的格，避免重复往返（本地推断）
-        self.known_empty: Set[XY] = set()
 
         # 堡垒模型（规则 §8.5）
         self.fortress = FortressModel(cfg) if cfg is not None else None
-
-        # 上一 Tick 的 tick（用于「同 Tick 重发」判定）
-        self.last_processed_tick: int = -1
-        self.last_session: Optional[str] = None
 
         # 裁判下发的无效动作计数（仅用于自检告警）
         self.last_invalid_actions: int = 0
@@ -101,38 +90,15 @@ class WorldModel:
         self.resources.clear()
         self.enemies.clear()
         self.visited.clear()
-        self.harvested.clear()
-        self.killed_enemies.clear()
         self.mission_points.clear()
         self.mission_done.clear()
         self.event_log.clear()
-        self.event_advices.clear()
-        self.known_empty.clear()
 
         # 堡垒模型就地重置（保留同一实例）
         if self.fortress is not None:
             self.fortress.reset_for_session()
 
-        self.last_processed_tick = -1
-        self.last_session = None
         self.last_invalid_actions = 0
-
-    def reset(self) -> None:
-        """等价于 reset_for_session 的便捷入口（不带参数）。"""
-        self.reset_for_session(self.session_id or "")
-
-    def is_new_frame(self, p: Perception) -> bool:
-        """
-        判断是否为「需要推进策略」的新帧。
-
-        - session_id 变化 → 新场次，全新推进；
-        - 同场次且 tick 严格递增 → 新帧；
-        - 同场次且 tick 小于等于已处理 tick → 同 Tick 重发/旧帧，不重复推进策略。
-        （协议第 4 节：同一场次只处理最新 Tick；早于当前 Tick 的感知应丢弃。）
-        """
-        if p.session_id != self.last_session:
-            return True
-        return p.tick > self.last_processed_tick
 
     # ------------------------------------------------------------------
     # 更新
@@ -143,8 +109,6 @@ class WorldModel:
             self.reset_for_session(p.session_id)
 
         self.tick = p.tick
-        self.last_processed_tick = max(self.last_processed_tick, p.tick)
-        self.last_session = p.session_id
 
         if p.map_w and p.map_h:
             self.map_w, self.map_h = p.map_w, p.map_h
@@ -162,17 +126,16 @@ class WorldModel:
                         self.last_invalid_actions, p.score.invalid_actions, p.tick)
             self.last_invalid_actions = p.score.invalid_actions
 
-        # 障碍：静态记忆，需按 TTL 清理（临时障碍视为长期，事件到期由事件策略处理）
+        # 障碍：静态记忆，需按 TTL 清理
         for ob in p.obstacles:
             self.obstacles[ob.position] = Obstacle(
-                position=ob.position, last_seen_tick=p.tick, temporary=ob.temporary
+                position=ob.position, last_seen_tick=p.tick
             )
 
         # 资源：以 id 维度去重（同 id 位置不变）；收集后本场不刷新
         for res in p.resources:
             self.resources[res.position] = ResourceEntity(
                 id=res.id, position=res.position, value=res.value, is_high=res.is_high,
-                first_seen_tick=self.resources.get(res.position, res).first_seen_tick or p.tick,
                 last_seen_tick=p.tick,
             )
 
@@ -180,7 +143,7 @@ class WorldModel:
         for rb in p.robots:
             self.enemies[rb.robot_id or rb.id] = RobotEntity(
                 id=rb.id, team=rb.team, robot_id=rb.robot_id, position=rb.position,
-                hp=rb.hp, defending=rb.defending, protected=rb.protected,
+                hp=rb.hp, protected=rb.protected,
                 last_seen_tick=p.tick,
             )
 
@@ -232,9 +195,6 @@ class WorldModel:
         """本地碰撞预判：在界内且非已知障碍。"""
         return self.in_bounds(xy) and not self.is_obstacle(xy)
 
-    def enemy_positions(self) -> List[XY]:
-        return [e.position for e in self.enemies.values()]
-
     def nearest_resource(self, from_xy: XY, high_first: bool = True) -> Optional[ResourceEntity]:
         """返回「价值 / 距离」最优的资源；高价值优先由其价值体现。"""
         best: Optional[ResourceEntity] = None
@@ -272,24 +232,6 @@ class WorldModel:
             return False
         self.event_log.append(text)
         return True
-
-    def add_event_advice(self, advice: EventAdvice) -> None:
-        self.event_advices.append(advice)
-
-    def active_event_advices(self) -> List[EventAdvice]:
-        """返回当前 Tick 可能仍在生效的事件理解结果（按 effect_window 过滤）。"""
-        out = []
-        for a in self.event_advices:
-            if not a.valid:
-                continue
-            if a.effect_end is not None and self.tick >= a.effect_end:
-                continue  # 有效期包含生效 Tick，不包含结束 Tick
-            out.append(a)
-        return out
-
-    def clear_consumed_advices(self) -> None:
-        self.event_advices = [a for a in self.event_advices
-                              if a.effect_end is None or self.tick < a.effect_end]
 
 
 def manhattan(a: XY, b: XY) -> int:

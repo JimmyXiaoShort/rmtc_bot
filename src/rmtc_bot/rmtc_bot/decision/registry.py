@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 from typing import Callable, Dict, Optional
 
-from ..config import DECISION_TYPE_REGISTRY
 from ..models import Intent, Perception
 from .collector import decide_collect
 from .combat import decide_combat
@@ -84,11 +83,6 @@ STRATEGY_TABLE: Dict[str, Callable[[Perception, "DecisionContext"], Intent]] = {
 }
 
 
-def registered_types() -> Dict[str, dict]:
-    """返回登记表（供日志/答辩展示）。"""
-    return DECISION_TYPE_REGISTRY
-
-
 def dispatch(decision_type: str, p: Perception, ctx: "DecisionContext") -> Intent:
     """按已登记枚举分派策略；未登记则回退 auto（保守）。"""
     fn = STRATEGY_TABLE.get(decision_type)
@@ -98,7 +92,7 @@ def dispatch(decision_type: str, p: Perception, ctx: "DecisionContext") -> Inten
     return fn(p, ctx)
 
 
-__all__ = ["infer_stage", "dispatch", "registered_types", "STRATEGY_TABLE", "DecisionContext"]
+__all__ = ["infer_stage", "dispatch", "STRATEGY_TABLE", "DecisionContext"]
 
 
 class DecisionContext:

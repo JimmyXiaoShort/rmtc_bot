@@ -4,13 +4,9 @@
 from .parser import (  # noqa: F401
     PerceptionParseError,
     parse_perception,
-    parse_registry,
-    parse_relative_position,
 )
 
 __all__ = [
     "PerceptionParseError",
     "parse_perception",
-    "parse_registry",
-    "parse_relative_position",
 ]

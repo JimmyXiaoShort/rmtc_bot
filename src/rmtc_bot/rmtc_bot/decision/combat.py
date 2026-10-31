@@ -26,7 +26,6 @@ log = logging.getLogger("rmtc.strategy.combat")
 # 战斗行为参数（答辩/调参用；与规则数值无关）
 _ENGAGE_RANGE = 2      # 攻击射程（直线 1–2 格；已进入射程即开火）
 _SCAN_RANGE = 4        # 索敌扫描半径（视野内 ±4 格）
-_DEFEND_HP = 30        # HP 低于该值且被贴脸时优先 DEFEND
 _FLEE_HP = 15          # HP 低于该值强制撤离
 _SAFE_MODE_HP = 40     # safe 模式触发撤离的 HP 阈值
 

@@ -3,7 +3,7 @@
 主 ROS 2 节点（rclpy）。
 
 职责：
-- 订阅 /team_X/perception、/referee/event_text、/referee/mission、/referee/team_registry；
+- 订阅 /team_X/perception、/referee/event_text、/referee/mission；
 - 发布 /team_X/action、/team_X/registration（注册发布者须保持运行，协议第 2 节）；
 - 每帧：世界模型更新 → 事件消费 → FSM 决策 → 动作构造 → 发布；
 - 双向验证：核对感知中 self.last_action（协议第 1.2 节），本地留痕；
@@ -22,7 +22,7 @@ import rclpy
 from rclpy.node import Node
 
 from .comm.action import ActionBuilder
-from .comm.ros_bridge import RosBridge, spin_for
+from .comm.ros_bridge import RosBridge
 from .config import Config, PARAM_ENV_DEFAULTS, load_config
 from .decision.fsm import DecisionFSM
 from .event.event import EventPolicy

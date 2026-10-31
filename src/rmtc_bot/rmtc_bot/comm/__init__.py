@@ -6,7 +6,6 @@ from .ros_bridge import (  # noqa: F401
     build_qos_event,
     build_qos_perception_action,
     build_qos_registry_mission,
-    spin_for,
 )
 
 __all__ = [
@@ -14,5 +13,4 @@ __all__ = [
     "build_qos_perception_action",
     "build_qos_registry_mission",
     "build_qos_event",
-    "spin_for",
 ]

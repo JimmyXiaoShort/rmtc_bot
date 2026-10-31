@@ -61,9 +61,3 @@ class ActionBuilder:
                 return None
             msg["direction"] = direction
         return json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
-
-    def parse_result(self, result: Dict) -> None:
-        """裁判回执解析（可选：用于统计无效动作/错误码）。"""
-        err = result.get("error_code")
-        if err not in (None, 0):
-            log.warning("裁判回执 error_code=%s detail=%s", err, result.get("detail"))

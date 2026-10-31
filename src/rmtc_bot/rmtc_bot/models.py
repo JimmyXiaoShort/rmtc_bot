@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 XY = Tuple[int, int]
 
@@ -41,7 +41,6 @@ class SelfState:
     position: XY
     hp: int = 0
     alive: bool = True
-    defending: bool = False          # 最近状态的防御标记，不保证即将结算的 Tick 继续防御
     protected: bool = False          # 是否处于出生保护（保护期内不能攻击）
     respawn_in: int = 0              # 距离复活还有多少 Tick（存活时为 0）
     position_reason: Optional[str] = None   # 仅开局/重生首帧：initial / respawn
@@ -57,7 +56,6 @@ class RobotEntity:
     robot_id: str
     position: XY
     hp: int = 0
-    defending: bool = False
     protected: bool = False
     last_seen_tick: int = 0
 
@@ -70,7 +68,6 @@ class ResourceEntity:
     position: XY
     value: int = 0
     is_high: bool = False
-    first_seen_tick: int = 0
     last_seen_tick: int = 0
 
 
@@ -80,7 +77,6 @@ class Obstacle:
 
     position: XY
     last_seen_tick: int = 0
-    temporary: bool = False          # 事件产生的临时障碍（原文未明确感知是否区分，此处仅本地标注）
 
 
 @dataclass
@@ -117,24 +113,14 @@ class Perception:
     resources: List[ResourceEntity] = field(default_factory=list)
     obstacles: List[Obstacle] = field(default_factory=list)
     score: Score = field(default_factory=Score)
-    mission_text: str = ""
     missions: List[Mission] = field(default_factory=list)
     map_w: int = 0
     map_h: int = 0
-    event_text: str = ""
-
-    # 原始 JSON（仅用于调试留痕，不参与决策）
-    raw: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
 # 决策层结构
 # ---------------------------------------------------------------------------
-# 动作 JSON 必须使用小写 action 字段与 direction 字段（协议第 4 节）：
-#   move/attack 必需 direction ∈ {up,down,left,right}；defend/wait 无 direction。
-ACTION_DIRECTIONS = ("up", "down", "left", "right")
-
-
 @dataclass
 class Intent:
     """状态机输出的「意图」，由 action.builder 转为协议动作 JSON。"""
@@ -143,33 +129,3 @@ class Intent:
     direction: Optional[str] = None            # move/attack 必需：up/down/left/right
     reason: str = ""                           # 决策理由（写入日志，便于答辩）
     target: Optional[XY] = None                # 目标坐标（日志用）
-
-
-@dataclass
-class EventAdvice:
-    """LLM 对随机事件公告的结构化理解结果（经本地校验后使用）。
-
-    【合规】这是「模型输出」，不是「本地解析」。程序不得用正则/关键词/模板
-    直接解析 event_text；本结构只承载 LLM 的返回值。
-    """
-
-    raw_text: str = ""
-    valid: bool = False
-    event_type: str = ""
-    effect_start: Optional[int] = None      # 生效 Tick（逻辑 Tick）
-    effect_end: Optional[int] = None        # 结束 Tick（有效期包含生效 Tick，不含结束 Tick）
-    area: Optional[Dict[str, int]] = None   # 影响区域（矩形四点 / 交点等，尽力而为）
-    danger_level: str = "unknown"           # high / medium / low / unknown
-    advice: str = ""
-    received_tick: Optional[int] = None
-    from_session: str = ""
-
-
-@dataclass
-class TacticAdvice:
-    """LLM 对「任务/战术」的高层建议（可选路径）。"""
-
-    valid: bool = False
-    priority: str = "resources"     # resources / missions / combat / survive
-    note: str = ""
-    from_session: str = ""

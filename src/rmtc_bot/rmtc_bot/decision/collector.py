@@ -138,7 +138,6 @@ def decide_collect(p: Perception, ctx) -> Intent:
     # 返回脚下这个 d=0（score 最高）的已空资源，导致此后不再追任何新资源。
     if me.position in wm.resources:
         wm.mark_resource_collected(me.position)
-        wm.harvested[me.position] = True
 
     # 全图都走过 → WAIT（停留；如规则允许原地重复也可继续 MOVE，此处选保守 WAIT）
     # 注意：感知缺少 map 尺寸时（联调早期）不得误判为全图已覆盖，跳过该检查。

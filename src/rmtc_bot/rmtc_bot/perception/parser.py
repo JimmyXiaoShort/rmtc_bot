@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from .. import constants as C
 from ..models import (
@@ -193,7 +193,6 @@ def parse_perception(raw: str) -> Perception:
         position=self_xy,
         hp=_as_int(s.get("hp"), 0) or 0,
         alive=_as_bool(s.get("alive"), True),
-        defending=_as_bool(s.get("defending"), False),
         protected=_as_bool(s.get("protected"), False),
         respawn_in=_as_int(s.get("respawn_in"), 0) or 0,
         position_reason=(
@@ -226,7 +225,6 @@ def parse_perception(raw: str) -> Perception:
                 robot_id=ent.get("robot_id") if isinstance(ent.get("robot_id"), str) else "",
                 position=abs_xy,
                 hp=_as_int(ent.get("hp"), 0) or 0,
-                defending=_as_bool(ent.get("defending"), False),
                 protected=_as_bool(ent.get("protected"), False),
                 last_seen_tick=tick,
             ))
@@ -240,7 +238,6 @@ def parse_perception(raw: str) -> Perception:
                 position=abs_xy,
                 value=value,
                 is_high=value >= C.RESOURCE_HIGH_THRESHOLD,
-                first_seen_tick=tick,
                 last_seen_tick=tick,
             ))
         elif etype == C.ENTITY_OBSTACLE:
@@ -301,29 +298,7 @@ def parse_perception(raw: str) -> Perception:
         resources=resources,
         obstacles=obstacles,
         score=score,
-        mission_text=obj.get("mission_text") if isinstance(obj.get("mission_text"), str) else "",
         missions=missions,
         map_w=map_w,
         map_h=map_h,
-        event_text=obj.get("event_text") if isinstance(obj.get("event_text"), str) else "",
-        raw=obj,
     )
-
-
-def parse_registry(raw: str) -> Dict[str, str]:
-    """
-    解析队伍名录 /referee/team_registry → {席位: 队名}。
-    名录仅供显示/记录，不参与决策路由（协议第 2 节）。
-    """
-    out: Dict[str, str] = {}
-    try:
-        obj = json.loads(raw)
-    except Exception:
-        return out
-    teams = obj.get("teams") if isinstance(obj, dict) else None
-    if not isinstance(teams, list):
-        return out
-    for t in teams:
-        if isinstance(t, dict) and isinstance(t.get("team"), str):
-            out[t["team"]] = t.get("name") if isinstance(t.get("name"), str) else ""
-    return out

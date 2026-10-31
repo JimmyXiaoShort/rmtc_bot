@@ -327,10 +327,3 @@ class LLMGateway:
             reason=str(obj.get("reason", "llm-event"))[:32],
         )
 
-    def ping(self) -> bool:
-        """联调自检：<GATEWAY>/healthz 是否可达。"""
-        try:
-            r = requests.get(self.base_url.rstrip("/") + "/healthz", timeout=self.timeout)
-            return r.status_code == 200
-        except Exception:  # noqa: BLE001
-            return False

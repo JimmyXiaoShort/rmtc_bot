@@ -6,7 +6,7 @@
 - 纯本地、确定性；LLM 只通过 ResultInbox 注入「事件理解 / 战术建议」，
   绝不进入逐 Tick 热路径。
 - 场次切换（session_id 变化）→ 清空全部缓存并重新定位。
-- 同 Tick 重发不重复推进（由 main 通过 WorldModel.is_new_frame 保证）。
+- 同 Tick 重发不重复推进（由 main 通过 tick 比较保证）。
 """
 
 from __future__ import annotations
