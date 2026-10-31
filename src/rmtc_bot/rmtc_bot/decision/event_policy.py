@@ -20,7 +20,7 @@ from typing import Optional
 from ..models import Intent, Perception
 from ..perception.world_model import WorldModel
 
-log = logging.getLogger("rmtc.event")
+log = logging.getLogger("rmtc.decision.event_policy")
 
 
 @dataclass

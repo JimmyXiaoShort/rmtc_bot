@@ -19,11 +19,11 @@ from typing import Dict, Optional
 import rclpy
 from rclpy.node import Node
 
-from .comm.action import ActionBuilder
+from .action import ActionBuilder
 from .comm.ros_bridge import RosBridge
 from .config import Config, PARAM_ENV_DEFAULTS, load_config
 from .decision.fsm import DecisionFSM
-from .event.event import EventPolicy
+from .decision.event_policy import EventPolicy
 from .llm.gateway import LLMGateway
 from .models import Perception
 from .perception.world_model import WorldModel
@@ -115,13 +115,21 @@ class RmtcBotNode(Node):
             log.error("感知解析失败：%s（原文已丢弃）", exc)
             return
 
-        if p.tick == self._last_tick:
-            return  # 同 tick 重发，忽略
-        self._last_tick = p.tick
         prev_session = self.world.session_id
+
+        # 场次切换（session_id 变化）→ 重置 tick 去重基准，避免跨场次 tick 碰撞
+        # （规则 §5.1：同一场次中早于当前 Tick 的感知应丢弃）
+        if prev_session is not None and prev_session != p.session_id:
+            self._last_tick = -1
+
+        # 同 Tick 重发 或 早于当前 Tick 的感知 → 丢弃（规则 §5.1）
+        if p.tick <= self._last_tick:
+            return
+        self._last_tick = p.tick
+
         self.world.update(p)          # 内部已在 session 变化时重建世界模型（含堡垒）
 
-        # 场次切换（session_id 变化）→ 重置事件栈（避免上一场公告残留影响决策）
+        # 场次切换 → 重置事件栈（避免上一场公告残留影响决策）
         if prev_session is not None and prev_session != p.session_id:
             log.info("session 切换 %s -> %s，重置事件栈", prev_session, p.session_id)
             self.event_policy.reset()

@@ -7,7 +7,7 @@ PACKAGE_NAME = "rmtc_bot"
 setup(
     name=PACKAGE_NAME,
     version="1.1.2",
-    packages=find_packages(exclude=["test"]),
+    packages=find_packages(exclude=["tests", "tests.*"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + PACKAGE_NAME]),
         ("share/" + PACKAGE_NAME, ["package.xml"]),

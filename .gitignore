@@ -6,6 +6,6 @@
 # Python 缓存
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
-# 轮间临时决策配置（只改 decision_type，不入库）
-/decision_config.json
+# decision_config.json 为现场唯一可改文件，默认值入库（仅 decision_type）

@@ -33,11 +33,11 @@ os.environ.setdefault("RMTC_GATEWAY", "http://127.0.0.1:8080")
 os.environ.setdefault("RMTC_TEAM_TOKEN", "")   # 留空：自测不调用 LLM，走规则策略
 os.environ.setdefault("ROS_DOMAIN_ID", "27")
 
-from rmtc_bot.comm.action import ActionBuilder            # noqa: E402
+from rmtc_bot.action import ActionBuilder                      # noqa: E402
 from rmtc_bot.config import load_config                    # noqa: E402
+from rmtc_bot.decision.event_policy import EventPolicy          # noqa: E402
 from rmtc_bot.decision.fsm import DecisionFSM               # noqa: E402
 from rmtc_bot.decision.registry import DecisionContext      # noqa: E402
-from rmtc_bot.event.event import EventPolicy                # noqa: E402
 from rmtc_bot.llm.gateway import LLMGateway                 # noqa: E402
 from rmtc_bot.perception.parser import parse_perception     # noqa: E402
 from rmtc_bot.perception.world_model import WorldModel      # noqa: E402
