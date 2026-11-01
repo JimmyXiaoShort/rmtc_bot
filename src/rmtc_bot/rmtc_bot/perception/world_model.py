@@ -36,9 +36,6 @@ ROBOT_MEMORY_TTL = 8        # Tick：视野外敌人推断保留时长
 RESOURCE_MEMORY_TTL = 400   # Tick：资源记忆保留时长（本场不刷新）
 OBSTACLE_MEMORY_TTL = 100_000  # 静态障碍长期保留（临时障碍需按事件到期清理）
 
-# 击杀后对同一台敌车的「不主动追击」窗口：不在复活点上守着同一个不动目标刷伤害
-KILL_IGNORE_TICKS = 40
-
 
 class WorldModel:
     """单调更新的世界模型；每个场次重建一次（session_id 变化时 reset）。"""
@@ -59,13 +56,6 @@ class WorldModel:
         self.obstacles: Dict[XY, Obstacle] = {}
         self.resources: Dict[XY, ResourceEntity] = {}
         self.enemies: Dict[str, RobotEntity] = {}      # 以 robot_id 为键
-        self.enemy_still: Dict[str, int] = {}          # 敌车「连续同格」计数（识别挂机）
-        self.diag_holds: int = 0                       # 斜对角让拍次数（防止无限等待）
-        # 击杀撤离状态：刚打死的敌车位置 + 击杀发生的 Tick（见 combat._leave_step）
-        self.kill_point: Optional[XY] = None
-        self.kill_tick: int = -1
-        # 击杀后该敌车的「不追击」窗口（到期 Tick）；避免回头找它刷分
-        self.ignore_until: Dict[str, int] = {}
         self.visited: Set[XY] = set()                  # 本车已到过的格（用于探索）
         self.mission_points: Set[XY] = set()           # 任务坐标（来自感知 missions 的 reach 型）
         self.mission_done: Dict[XY, bool] = {}         # 任务坐标是否已完成
@@ -101,11 +91,6 @@ class WorldModel:
         self.obstacles.clear()
         self.resources.clear()
         self.enemies.clear()
-        self.enemy_still.clear()
-        self.diag_holds = 0
-        self.kill_point = None
-        self.kill_tick = -1
-        self.ignore_until.clear()
         self.visited.clear()
         self.mission_points.clear()
         self.mission_done.clear()
@@ -158,21 +143,12 @@ class WorldModel:
             )
 
         # 敌人：以 robot_id 为键更新；离开视野靠 TTL 过期
-        prev_enemies = {k: e.position for k, e in self.enemies.items()}
-        seen_now = {rb.robot_id or rb.id for rb in p.robots}
         for rb in p.robots:
-            key = rb.robot_id or rb.id
-            prev = self.enemies.get(key)
-            if prev is not None and prev.position == rb.position:
-                self.enemy_still[key] = self.enemy_still.get(key, 0) + 1
-            else:
-                self.enemy_still[key] = 0
-            self.enemies[key] = RobotEntity(
+            self.enemies[rb.robot_id or rb.id] = RobotEntity(
                 id=rb.id, team=rb.team, robot_id=rb.robot_id, position=rb.position,
                 hp=rb.hp, protected=rb.protected,
                 last_seen_tick=p.tick,
             )
-        self._detect_kill(p, prev_enemies, seen_now)
 
         # 任务（来自感知 missions）：reach 型记录坐标；done 状态跟随感知更新
         for m in p.missions:
@@ -190,31 +166,6 @@ class WorldModel:
 
         self._expire(p.tick)
 
-    def _detect_kill(self, p: Perception, prev_targets: Dict[str, XY],
-                     seen_now: Set[str]) -> None:
-        """识别「上一 Tick 开火并打死了攻击线上的敌车」，记下击杀点。
-
-        判据：上一 Tick 动作为 attack；某台上次记录在攻击线（直线 1–2 格）内的
-        敌车本帧已不在视野（阵亡后裁判不再下发，复活需 3 Tick）。产出的
-        kill_point 供 combat 立即撤离：对方在原出生点复活，留在原地继续输出
-        同一个不动的目标会触发不计分的机制，必须先把复活点甩出视野。
-        """
-        me = p.me
-        if me is None or me.position is None:
-            return
-        la = me.last_action
-        if la is None or la.action != "attack":
-            return
-        for key, pos in prev_targets.items():
-            if pos is None or key in seen_now:
-                continue   # 本帧仍可见 → 没被打死（或已复活）
-            if manhattan(pos, me.position) > C.ATTACK_RANGE_MAX:
-                continue   # 不在攻击线上，消失只是走出了视野
-            self.kill_point = pos
-            self.kill_tick = p.tick
-            self.ignore_until[key] = p.tick + KILL_IGNORE_TICKS
-            return
-
     def _expire(self, now: int) -> None:
         """按 TTL 清理推断性记忆，避免把过时推断当实时真值。"""
         stale_enemies = [
@@ -223,7 +174,6 @@ class WorldModel:
         ]
         for k in stale_enemies:
             del self.enemies[k]
-            self.enemy_still.pop(k, None)
 
         stale_res = [
             k for k, r in self.resources.items()
@@ -286,19 +236,11 @@ class WorldModel:
             cur = prev[cur][0]
         return prev[cur][1]
 
-    def nearest_resource(self, from_xy: XY, high_first: bool = True,
-                         skip=None) -> Optional[ResourceEntity]:
-        """返回「价值 / 距离」最优的资源；高价值优先由其价值体现。
-
-        `skip(xy) -> bool` 用于跳过指定区域（例如刚击杀后的撤离区）内的资源。
-        """
+    def nearest_resource(self, from_xy: XY, high_first: bool = True) -> Optional[ResourceEntity]:
+        """返回「价值 / 距离」最优的资源；高价值优先由其价值体现。"""
         best: Optional[ResourceEntity] = None
         best_key = None
         for res in self.resources.values():
-            if res.position is None:
-                continue
-            if skip is not None and skip(res.position):
-                continue
             d = manhattan(from_xy, res.position)
             # 单位距离价值：高价值资源天然更优；距离越近越优
             score = res.value / max(1, d)
@@ -308,42 +250,8 @@ class WorldModel:
                 best = res
         if best is not None and not high_first:
             # 仅按距离选择
-            cands = [r for r in self.resources.values()
-                     if r.position is not None and not (skip is not None and skip(r.position))]
-            if not cands:
-                return None
-            return min(cands, key=lambda r: manhattan(from_xy, r.position))
+            return min(self.resources.values(), key=lambda r: manhattan(from_xy, r.position))
         return best
-
-    def explore_target(self, from_xy: XY, skip=None) -> Optional[XY]:
-        """返回最近的「未探索且可走」格，用于无资源/无任务时铺开探索。
-
-        BFS 从当前位置由近及远扩散，遇到第一个 visited 集合之外的格即返回；
-        全图已探索（或地图尺寸未知）返回 None，由调用方回退到地图中心。
-        视野是 ±4 格，只有走过去才能看到新资源，所以必须主动铺开而不是原地等。
-
-        `skip(xy) -> bool` 标记「不作为目标但可从其穿行」的格（例如刚击杀后的
-        撤离区），用于探索时主动避开该区域又不把地图切断。
-        """
-        if self.map_w <= 0 or self.map_h <= 0:
-            return None
-        step_vec = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
-        queue = deque([from_xy])
-        seen = {from_xy}
-        while queue:
-            cur = queue.popleft()
-            for d in ("up", "down", "left", "right"):
-                nx = (cur[0] + step_vec[d][0], cur[1] + step_vec[d][1])
-                if nx in seen or not self.is_free(nx):
-                    continue
-                seen.add(nx)
-                queue.append(nx)
-                if nx in self.visited:
-                    continue
-                if skip is not None and skip(nx):
-                    continue   # 可穿行但不作为探索目标
-                return nx
-        return None
 
     def mark_resource_collected(self, xy: XY) -> None:
         """资源被收集后从记忆移除（本场不刷新）。"""

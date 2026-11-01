@@ -249,14 +249,9 @@ def parse_perception(raw: str) -> Perception:
             # 未知实体类型：忽略，不报错（保持前向兼容）
             continue
 
-    # ---- score（裁判结算值：态势判断用；invalid_actions 作自检信号）----
+    # ---- score（仅取 invalid_actions 作为自检信号）----
     sc = obj.get("score") if isinstance(obj.get("score"), dict) else {}
-    score = Score(
-        resource_value=_as_int(sc.get("resource_value"), 0) or 0,
-        effective_damage=_as_float(sc.get("effective_damage"), 0.0) or 0.0,
-        mission_completed=_as_int(sc.get("mission_completed"), 0) or 0,
-        invalid_actions=_as_int(sc.get("invalid_actions"), 0) or 0,
-    )
+    score = Score(invalid_actions=_as_int(sc.get("invalid_actions"), 0) or 0)
 
     # ---- missions（结构化任务；任务数据与随机事件文本分别处理） ----
     missions: List[Mission] = []

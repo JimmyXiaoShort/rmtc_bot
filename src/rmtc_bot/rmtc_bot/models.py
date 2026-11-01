@@ -81,16 +81,12 @@ class Obstacle:
 
 @dataclass
 class Score:
-    """score.*：裁判下发的本队累计分（协议第 3 节）。
+    """score.*：仅保留裁判下发的无效动作计数，作为最后一道自检信号。
 
-    resource_value / effective_damage / mission_completed 是裁判结算值，程序只读取、
-    不自行计算；仅用于判断「当前态势」（低分进攻 / 高分防守）。
-    invalid_actions 作为本队动作合法性自检信号。
+    其余累计分（resource_value / effective_damage / mission_completed）不参与决策：
+    资源、伤害、任务进度均由视野内实体直接感知，无需裁判汇总分。
     """
 
-    resource_value: int = 0
-    effective_damage: float = 0.0
-    mission_completed: int = 0
     invalid_actions: int = 0
 
 

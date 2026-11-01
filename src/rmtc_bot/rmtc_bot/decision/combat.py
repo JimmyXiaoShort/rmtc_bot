@@ -19,7 +19,6 @@ import logging
 from collections import deque
 from typing import Optional
 
-from .. import constants as C
 from ..models import Intent, Perception
 from ..perception.world_model import WorldModel, manhattan
 
@@ -32,14 +31,6 @@ _FLEE_HP = 15          # HP 低于该值强制撤离
 _SAFE_MODE_HP = 40     # safe 模式触发撤离的 HP 阈值
 _RETREAT_RADIUS = 8    # 撤离目标搜索半径（只找附近安全格，避免跨全图逃跑）
 
-# 态势参数（本地策略值，不影响协议合法性）
-_DEFEND_SCORE = 38.0   # 本队阶段二得分达到该值即转「防守」姿态（资源 30 + 对抗 15 = 45 满分）
-_DEFEND_HP = 45        # 防守姿态下的脱离阈值（比 _FLEE_HP 保守，优先保分而非换血）
-_KILL_LEAVE_DIST = 5   # 击杀后至少拉开 5 格，把复活点甩到视野（±4）之外
-_KILL_LEAVE_TIMEOUT = 12  # 撤离最长持续时间（被地图边缘/障碍挡住时的兜底）
-_KILL_AVOID_TICKS = 30    # 击杀后这段时间内不把「复活点周边」当作资源/探索目标
-_IDLE_TICKS = 8        # 敌车连续 8 Tick 同格 → 视为挂机，不再主动贴上去（见 _enemy_near）
-
 # 方向 → 位移（规则 §4.1：x 向右、y 向下）
 _DIR_VEC = {
     "up": (0, -1),
@@ -49,13 +40,8 @@ _DIR_VEC = {
 }
 
 
-def _enemy_near(p: Perception, wm: Optional[WorldModel] = None) -> Optional[object]:
-    """返回视野内最近的存活敌车（RobotEntity 或 None）。
-
-    挂机（连续 _IDLE_TICKS 个 Tick 停在同一格）且不在攻击线内的敌车不参与索敌：
-    贴上去只会重复「对着不动的目标输出」，还会把车卡在斜对角上一直 WAIT。
-    它若已经站在攻击线内则照常还击——那属于正常交战，不是主动刷分。
-    """
+def _enemy_near(p: Perception) -> Optional[object]:
+    """返回视野内最近的存活敌车（RobotEntity 或 None）。"""
     best = None
     best_d2 = float("inf")
     me = p.me
@@ -64,8 +50,6 @@ def _enemy_near(p: Perception, wm: Optional[WorldModel] = None) -> Optional[obje
     x, y = me.position
     for r in p.robots:
         if r.position is None:
-            continue
-        if wm is not None and _enemy_idle(wm, r) and not _line_of_fire(p, r):
             continue
         d2 = (r.position[0] - x) ** 2 + (r.position[1] - y) ** 2
         if d2 <= _SCAN_RANGE ** 2 and d2 < best_d2:
@@ -250,101 +234,19 @@ def _flee_direction(p: Perception, wm: WorldModel) -> Optional[str]:
     return None
 
 
-def _score_progress(p: Perception) -> float:
-    """本队阶段二当前得分（按规则 §10.2 折算资源 30 分 + 对抗 15 分）。
-
-    数值直接读裁判下发的 score.resource_value / effective_damage，不自行计分；
-    这里只是把累计值换算成 0–45 的「得分进度」，用于决定进攻还是防守。
-    """
-    sc = p.score
-    if sc is None:
-        return 0.0
-    res = C.SCORE_STAGE2_RESOURCE_POINTS * min(
-        max(float(sc.resource_value), 0.0) / C.SCORE_STAGE2_RESOURCE_FULL, 1.0)
-    dmg = C.SCORE_STAGE2_DAMAGE_POINTS * min(
-        max(float(sc.effective_damage), 0.0) / C.SCORE_STAGE2_DAMAGE_FULL, 1.0)
-    return res + dmg
-
-
-def _chebyshev(a: XY, b: XY) -> int:
-    """棋盘距离：视野是 ±4 格的方形窗口，判断「是否还在视野内」必须用它。"""
-    return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
-
-
-def _enemy_key(enemy) -> str:
-    return getattr(enemy, "robot_id", None) or getattr(enemy, "id", "") or ""
-
-
-def _enemy_idle(wm: WorldModel, enemy) -> bool:
-    """敌车是否挂机（连续 _IDLE_TICKS 个 Tick 停在同一格）。"""
-    if enemy is None:
-        return False
-    return wm.enemy_still.get(_enemy_key(enemy), 0) >= _IDLE_TICKS
-
-
-def _in_avoid_zone(p: Perception, wm: WorldModel, xy: XY) -> bool:
-    """该格是否落在「刚击杀敌车的复活点周边」（撤离区内不主动回去）。"""
-    if wm.kill_point is None or xy is None:
-        return False
-    if p.tick - wm.kill_tick > _KILL_AVOID_TICKS:
-        return False
-    return _chebyshev(xy, wm.kill_point) < _KILL_LEAVE_DIST
-
-
-def _leave_step(p: Perception, wm: WorldModel, point: XY) -> Optional[str]:
-    """朝远离 `point` 的方向走一步，尽量把该点甩出视野（±4 格）。
-
-    单纯的贪心最远格即可：撤离阶段只求尽快离开复活点，不需要绕障规划；
-    距离相同则沿用上一 Tick 的方向，避免在两个格之间来回摆。
-    """
-    me = p.me
-    if me.position is None:
-        return None
-    la = me.last_action
-    prev_dir = getattr(la, "effective_direction", None) if la is not None else None
-    best, best_d = None, -1
-    for d, (dx, dy) in _DIR_VEC.items():
-        nx = (me.position[0] + dx, me.position[1] + dy)
-        if not wm.is_free(nx):
-            continue
-        dist = _chebyshev(nx, point)
-        if dist > best_d or (dist == best_d and d == prev_dir):
-            best, best_d = d, dist
-    return best
-
-
-def _identity_key(team, robot_id) -> tuple:
-    """(team, robot_id) 全序键。
-
-    只用 robot_id 比较是不够的：robot_id 是「队内编号」，对方同号（如我方 A1、
-    对方 B1 都是 1）时两者相等，无法打破对称。
-    """
-    return (str(team or ""), str(robot_id or ""))
-
-
-def _is_diag_adjacent(p: Perception, enemy) -> bool:
-    """敌车是否位于我方斜对角 1 格（|dx| == |dy| == 1）。"""
-    me = p.me
-    if me is None or me.position is None or enemy is None or enemy.position is None:
-        return False
-    dx = abs(enemy.position[0] - me.position[0])
-    dy = abs(enemy.position[1] - me.position[1])
-    return dx == 1 and dy == 1
-
-
 def _diag_axis_preference(p: Perception, enemy) -> Optional[str]:
-    """正对角线追击时的分轴偏好：按 (team, robot_id) 全序，保证两台车选不同轴。
+    """正对角线追击时的分轴偏好：按 robot_id 字典序，保证两台车选不同轴。
 
     若两台车都按同一规则选水平轴，会在斜对角上互相镜像绕圈（永不进入攻击线）。
     """
     me = p.me
     if me is None or enemy is None:
         return None
-    my_key = _identity_key(me.team, me.robot_id)
-    en_key = _identity_key(getattr(enemy, "team", None), getattr(enemy, "robot_id", None))
-    if not all(my_key) or not all(en_key) or my_key == en_key:
+    my_id = str(me.robot_id or me.team or "")
+    en_id = str(getattr(enemy, "robot_id", None) or getattr(enemy, "id", "") or "")
+    if not my_id or not en_id or my_id == en_id:
         return None
-    return "vertical" if my_key < en_key else "horizontal"
+    return "vertical" if my_id < en_id else "horizontal"
 
 
 def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
@@ -354,39 +256,12 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     if me is None or me.position is None:
         return Intent(kind="wait", reason="no-self")
 
-    enemy = _enemy_near(p, wm)
+    enemy = _enemy_near(p)
     hp = me.hp
-
-    # 刚被本方击杀过的敌车：KILL_IGNORE_TICKS 内不再主动去追（它大概率还停在
-    # 出生点挂机，追回来就等于回到「对同一个不动目标反复输出」的老路）。
-    # 只有它自己走进攻击线才还击，这种情况属于正常交战而不是刷分。
-    if (enemy is not None
-            and wm.ignore_until.get(_enemy_key(enemy), -1) > p.tick
-            and not _line_of_fire(p, enemy)):
-        enemy = None
 
     # 站上资源格即视为已采集：从记忆移除，避免 patrol 反复瞄准脚下已空资源
     if me.position in wm.resources:
         wm.mark_resource_collected(me.position)
-
-    # 态势判定：低分进攻、高分防守（挂机刷分已废弃，见 _detect_kill 的说明）
-    defensive = _score_progress(p) >= _DEFEND_SCORE
-
-    # ---- 1.5) 刚击杀出生点的敌车 → 立刻撤离，把复活点甩出视野 ----
-    # 对方 3 Tick 后在出生点复活，原地继续输出同一个位置会触发「反复打不动目标」
-    # 的不计分机制，所以击杀后直接拉开 _KILL_LEAVE_DIST 格；随后在
-    # _KILL_AVOID_TICKS 内也不再把它周边当作资源/探索目标（见 _patrol）。
-    if wm.kill_point is not None:
-        if p.tick - wm.kill_tick > _KILL_AVOID_TICKS:
-            wm.kill_point = None          # 撤离窗口结束，恢复正常规划
-        else:
-            far = _chebyshev(me.position, wm.kill_point) >= _KILL_LEAVE_DIST
-            expired = p.tick - wm.kill_tick > _KILL_LEAVE_TIMEOUT
-            if not (far or expired):
-                d = _leave_step(p, wm, wm.kill_point)
-                if d is not None:
-                    return Intent(kind="move", direction=d, reason="kill-leave")
-                return Intent(kind="wait", reason="kill-leave-blocked")
 
     # ---- 1) 残血 / safe 模式 → 优先撤离或 DEFEND ----
     # safe 模式语义是「优先脱离威胁」（见 registry._strategy_safe 文档）：
@@ -408,9 +283,7 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
             return Intent(kind="defend", reason=f"safe-corned({hp})")
 
     # 普通模式残血：贴脸（敌在射程线内）先 DEFEND 抵消伤害，否则撤离
-    # 防守姿态（高分）下提高阈值：宁可少打一轮也要保住已有分数
-    flee_hp = _DEFEND_HP if defensive else _FLEE_HP
-    if not safe_mode and hp <= flee_hp:
+    if not safe_mode and hp <= _FLEE_HP:
         if enemy is not None and _line_of_fire(p, enemy):
             la = me.last_action
             # 上一 Tick 已 DEFEND 且血量未变 → 对手大概率也在防御（互相僵持），
@@ -443,35 +316,6 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
     # ---- 3) 追敌 / 游走 ----
     if enemy is not None:
-        # 防守姿态：得分已领先，不再主动追击（追回来打的每一轮都是换血风险），
-        # 交给常规任务/巡逻继续吃资源；敌车主动贴脸时上面的开火分支已经覆盖。
-        if defensive:
-            return _patrol(p, wm)
-        # 斜对角 1 格：此时无法攻击（攻击要求轴对齐直线），双方若同时沿轴
-        # 推进，只会「互换位置」（同轴）或「撞同一格」（不同轴），形成 2 Tick
-        # 永久死循环。用 (team, robot_id) 全序做不对称裁决：序号小的一方原地
-        # 等待，序号大的一方靠近；已成功推进过一格但仍保持对角的（说明对方也
-        # 在推进），本 Tick 也改为等待。这样每 Tick 至多一方移动，1–2 Tick
-        # 即可进入攻击线。
-        if _is_diag_adjacent(p, enemy):
-            la = me.last_action
-            if me.protected:
-                return Intent(kind="wait", reason="diag-protected")
-            my_key = _identity_key(me.team, me.robot_id)
-            en_key = _identity_key(getattr(enemy, "team", None), getattr(enemy, "robot_id", None))
-            advanced = la is not None and la.action == "move" and bool(la.moved)
-            # 「让一拍」最多连做 2 次：若对方是被卡住/挂机的车，它永远不会靠近，
-            # 无限等待会让本车卡在斜对角上连旁边的资源都不去收（死锁）。
-            held = wm.diag_holds if (la is not None and la.action == "wait") else 0
-            if (advanced or my_key < en_key) and held < 2:
-                wm.diag_holds = held + 1
-                return Intent(kind="wait", reason="diag-hold")
-            wm.diag_holds = 0
-            d = _step_toward(p, wm, enemy.position,
-                             axis_pref=_diag_axis_preference(p, enemy))
-            if d is not None:
-                return Intent(kind="move", direction=d, reason="diag-close")
-            return Intent(kind="wait", reason="diag-blocked")
         d = _step_toward(p, wm, enemy.position,
                          axis_pref=_diag_axis_preference(p, enemy))
         if d is not None:
@@ -483,7 +327,7 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
 
 def _patrol(p: Perception, wm: WorldModel) -> Intent:
-    """无敌人时的游走：未完成任务点 → 已知资源 → 未探索格 → 地图中心。"""
+    """无敌人时的游走：未完成任务点 → 已知资源 → 地图中心。"""
     me = p.me
     assert me is not None and me.position is not None
     target = None
@@ -494,19 +338,9 @@ def _patrol(p: Perception, wm: WorldModel) -> Intent:
                 (abs(target[0] - me.position[0]) + abs(target[1] - me.position[1])):
             target = (tx, ty)
     if target is None:
-        res = wm.nearest_resource(me.position, high_first=True,
-                                  skip=lambda xy: _in_avoid_zone(p, wm, xy))
+        res = wm.nearest_resource(me.position, high_first=True)
         if res is not None and res.position is not None:
             target = res.position
-    if target is None:
-        # 视野只有 ±4 格，没有已知资源时不能原地等：先往地图中心走，到了再铺开探索
-        center = (p.map_w // 2, p.map_h // 2)
-        if (center != me.position and center not in wm.visited
-                and wm.is_free(center) and not _in_avoid_zone(p, wm, center)):
-            target = center
-        else:
-            target = wm.explore_target(me.position,
-                                       skip=lambda xy: _in_avoid_zone(p, wm, xy))
     if target is None:
         target = (p.map_w // 2, p.map_h // 2)
     # 已经站在游走目标上：原地等待，避免「离开一格又回来」的 2 格永久振荡
