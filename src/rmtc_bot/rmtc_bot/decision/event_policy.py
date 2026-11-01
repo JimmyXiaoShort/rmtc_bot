@@ -85,7 +85,9 @@ class EventPolicy:
         """调 LLM 网关解析文本，写入 EventState。失败则保守忽略。"""
         intent = self.llm.parse_event(text)
         if intent is None:
-            log.warning("LLM 事件解析失败/降级，本事件忽略")
+            # 具体原因（未启令牌/连接失败/HTTP 错误/回复不可用）已由网关层记录，
+            # 这里只表示「本事件没有可用动作」，练习环境 mock 固定回复也走这里。
+            log.info("LLM 未给出可用动作，忽略本事件（原因见 rmtc.llm 日志）")
             return
         # 窗口：本 tick 起 3 个动作周期内有效（协议未定义窗口，取保守值）
         with self._lock:

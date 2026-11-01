@@ -64,8 +64,11 @@ class LLMGateway:
         self.soft_quota = int(c.get("soft_quota", 0))
         self._used = 0
         if self.enabled:
-            log.info("LLM 网关启用: %s model=%s max_tokens=%s",
-                     self.base_url, self.model or "<default>", self.max_tokens)
+            log.info("LLM 网关启用: %s → %s model=%s max_tokens=%s",
+                     self.base_url, self._endpoint(), self.model or "<default>", self.max_tokens)
+        else:
+            log.warning("LLM 网关未启用（未提供 team_token / RMTC_TEAM_TOKEN），"
+                        "事件将只做本地保守处理")
 
     # ------------------------------------------------------------------
     def parse_event(self, text: str) -> Optional[Intent]:
@@ -85,7 +88,13 @@ class LLMGateway:
         finally:
             with self._lock:
                 self._inflight -= 1
-        return parse_response(content)
+        if content:
+            intent = parse_response(content)
+            if intent is None:
+                # 调用成功但回复不可用（如练习环境的固定模拟响应）→ 保持本地决策
+                log.info("LLM 已返回但内容不可用，忽略: %s", content[:80].replace("\n", " "))
+            return intent
+        return None
 
     # ------------------------------------------------------------------
     def _build_payload(self, user_text: str, json_mode: bool) -> Dict[str, Any]:
@@ -129,6 +138,24 @@ class LLMGateway:
             log.warning("LLM 连接异常: %r", exc)
             return None
 
+    def _endpoint(self) -> str:
+        """拼接请求地址：gateway 可写基址，也可直接写完整端点。
+
+        协议第 5 节的写法是 `<GATEWAY>/v1/chat/completions`，而本地练习环境
+        （rmtc_practice/测试使用教程）给出的就是完整地址
+        `http://127.0.0.1:8080/v1/chat/completions`。两种写法都要能用，
+        否则完整地址会被再拼一次路径 → 404，LLM 永远调不通。
+
+        另外允许省略协议头（现场手敲参数常写成 `127.0.0.1:8080`）：
+        requests 对无协议的地址会抛 MissingSchema，等于一次调用都没发出去。
+        """
+        base = self.base_url.strip().rstrip("/")
+        if "://" not in base:
+            base = "http://" + base.lstrip("/")
+        if base.endswith("/v1/chat/completions"):
+            return base
+        return base + "/v1/chat/completions"
+
     @staticmethod
     def _error_code(body: str) -> str:
         try:
@@ -139,7 +166,7 @@ class LLMGateway:
 
     def _chat(self, user_text: str) -> Optional[str]:
         """调用 <GATEWAY>/v1/chat/completions（OpenAI 兼容，非流式）。"""
-        url = self.base_url.rstrip("/") + "/v1/chat/completions"
+        url = self._endpoint()
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -195,5 +222,8 @@ class LLMGateway:
             log.error("LLM 鉴权失败 status=%s code=%s：请检查本场席位令牌", status, code)
         elif status == 503:
             log.warning("LLM audit_unavailable(503)：保持本地决策并联系裁判")
+        elif status == 404:
+            log.error("LLM 请求地址 404：%s —— 请确认 gateway 是基址（如 http://<IP>:<端口>）"
+                      "或完整端点（.../v1/chat/completions），不要带多余路径", self._endpoint())
         else:
             log.warning("LLM HTTP %s code=%s body=%s", status, code, body[:120])
