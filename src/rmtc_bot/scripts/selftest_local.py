@@ -63,7 +63,7 @@ def make_grid(dx: int = 0, dy: int = 0) -> str:
 
 
 def perception(stage=1, tick=5, session="self-1", self_xy=(10, 10), hp=100,
-               alive=True, entities=None, map_wh=(20, 20)):
+               alive=True, entities=None, map_wh=(20, 20), score=None):
     return json.dumps({
         "tick": tick,
         "session_id": session,
@@ -78,9 +78,9 @@ def perception(stage=1, tick=5, session="self-1", self_xy=(10, 10), hp=100,
                             "effective_direction": "right"},
         },
         "visible_entities": entities or [],
-        "score": {"resource_value": 0, "effective_damage": 0.0,
-                  "mission_completed": 0, "mission_completed_ids": [],
-                  "invalid_actions": 0},
+        "score": score or {"resource_value": 0, "effective_damage": 0.0,
+                           "mission_completed": 0, "mission_completed_ids": [],
+                           "invalid_actions": 0},
         "missions": [],
     })
 
@@ -126,13 +126,16 @@ def main() -> int:
             ok = False
             print("!! tick/session_id 未原样回填")
 
-    # 情况 2：第二阶段，左侧 1 格有敌机 → 期望 attack left
+    # 情况 2：第二阶段，左侧 1 格有敌机，且已有分数(≥25) → 期望 attack left
     raw2 = perception(
         stage=2, tick=60, session="self-2", self_xy=(10, 10), hp=100,
         entities=[{"type": "robot", "id": "B", "team": "B", "robot_id": "B",
                    "position": make_grid(-1, 0), "hp": 60,
                    "defending": False, "protected": False}],
         map_wh=(24, 24),
+        score={"resource_value": 120, "effective_damage": 0.0,
+               "mission_completed": 0, "mission_completed_ids": [],
+               "invalid_actions": 0},
     )
     p2, i2, m2 = run_case("情况2 第二阶段·贴脸攻击", raw2)
     if i2.kind != "attack":
@@ -152,6 +155,35 @@ def main() -> int:
     if not str(i3.reason).startswith("fort-"):
         ok = False
         print("!! 期望走堡垒策略(reason 以 fort- 开头)，实际", i3.reason)
+
+    # 情况 4：第二阶段 0 分（<25），左侧 1 格有敌机 → 期望避战（不 attack）
+    raw4 = perception(
+        stage=2, tick=70, session="self-4", self_xy=(10, 10), hp=100,
+        entities=[{"type": "robot", "id": "B", "team": "B", "robot_id": "B",
+                   "position": make_grid(-1, 0), "hp": 100,
+                   "defending": False, "protected": False}],
+        map_wh=(24, 24),
+    )
+    p4, i4, m4 = run_case("情况4 第二阶段·低分避战", raw4)
+    if i4.kind == "attack" or not str(i4.reason).startswith("lowscore"):
+        ok = False
+        print("!! 期望低分避战(不攻击)，实际", i4)
+
+    # 情况 5：第二阶段斜对角贴脸（双方都打不到对方）→ 期望 DEFEND 卡位，不镜像追击
+    raw5 = perception(
+        stage=2, tick=80, session="self-5", self_xy=(5, 5), hp=100,
+        entities=[{"type": "robot", "id": "B", "team": "B", "robot_id": "B",
+                   "position": make_grid(1, 1), "hp": 100,
+                   "defending": False, "protected": False}],
+        map_wh=(24, 24),
+        score={"resource_value": 120, "effective_damage": 0.0,
+               "mission_completed": 0, "mission_completed_ids": [],
+               "invalid_actions": 0},
+    )
+    p5, i5, m5 = run_case("情况5 第二阶段·斜对角不镜像", raw5)
+    if i5.kind != "defend" or i5.reason != "diag-hold":
+        ok = False
+        print("!! 期望 defend/diag-hold，实际", i5)
 
     print("\n" + ("全部自测通过 ✔" if ok else "存在未通过项 ✘"))
     return 0 if ok else 1

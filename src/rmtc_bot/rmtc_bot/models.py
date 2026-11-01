@@ -81,13 +81,24 @@ class Obstacle:
 
 @dataclass
 class Score:
-    """score.*：仅保留裁判下发的无效动作计数，作为最后一道自检信号。
+    """score.*：裁判下发的累计指标。
 
-    其余累计分（resource_value / effective_damage / mission_completed）不参与决策：
-    资源、伤害、任务进度均由视野内实体直接感知，无需裁判汇总分。
+    invalid_actions 作为自检信号；resource_value / effective_damage /
+    mission_completed 用于按规则 §10.2 估算当前阶段得分，供「低分发育」判断。
     """
 
     invalid_actions: int = 0
+    resource_value: int = 0
+    effective_damage: float = 0.0
+    mission_completed: int = 0
+
+    def total(self, stage: int) -> float:
+        """按规则 §9 / §10.2 换算当前阶段得分（仅用于策略自评）。"""
+        if stage == 1:
+            return 40.0 * min(self.resource_value / 200.0, 1.0)
+        return (30.0 * min(self.resource_value / 120.0, 1.0)
+                + 15.0 * min(self.effective_damage / 300.0, 1.0)
+                + 5.0 * self.mission_completed)
 
 
 @dataclass
