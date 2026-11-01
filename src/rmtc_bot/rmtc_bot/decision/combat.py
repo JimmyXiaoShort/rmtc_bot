@@ -19,6 +19,7 @@ import logging
 from collections import deque
 from typing import Optional
 
+from .. import constants as C
 from ..models import Intent, Perception
 from ..perception.world_model import WorldModel, manhattan
 
@@ -30,6 +31,11 @@ _SCAN_RANGE = 4        # 索敌扫描半径（视野内 ±4 格）
 _FLEE_HP = 15          # HP 低于该值强制撤离
 _SAFE_MODE_HP = 40     # safe 模式触发撤离的 HP 阈值
 _RETREAT_RADIUS = 8    # 撤离目标搜索半径（只找附近安全格，避免跨全图逃跑）
+
+# 态势参数（本地策略值，不影响协议合法性）
+_DEFEND_SCORE = 38.0   # 本队阶段二得分达到该值即转「防守」姿态（资源 30 + 对抗 15 = 45 满分）
+_DEFEND_HP = 45        # 防守姿态下的脱离阈值（比 _FLEE_HP 保守，优先保分而非换血）
+_IDLE_TICKS = 4        # 敌车连续 4 Tick 停在同一格 → 判定挂机，转为主动刷分
 
 # 方向 → 位移（规则 §4.1：x 向右、y 向下）
 _DIR_VEC = {
@@ -234,19 +240,62 @@ def _flee_direction(p: Perception, wm: WorldModel) -> Optional[str]:
     return None
 
 
+def _score_progress(p: Perception) -> float:
+    """本队阶段二当前得分（按规则 §10.2 折算资源 30 分 + 对抗 15 分）。
+
+    数值直接读裁判下发的 score.resource_value / effective_damage，不自行计分；
+    这里只是把累计值换算成 0–45 的「得分进度」，用于决定进攻还是防守。
+    """
+    sc = p.score
+    if sc is None:
+        return 0.0
+    res = C.SCORE_STAGE2_RESOURCE_POINTS * min(
+        max(float(sc.resource_value), 0.0) / C.SCORE_STAGE2_RESOURCE_FULL, 1.0)
+    dmg = C.SCORE_STAGE2_DAMAGE_POINTS * min(
+        max(float(sc.effective_damage), 0.0) / C.SCORE_STAGE2_DAMAGE_FULL, 1.0)
+    return res + dmg
+
+
+def _enemy_idle(wm: WorldModel, enemy) -> bool:
+    """敌车是否挂机（连续 _IDLE_TICKS 个 Tick 停在同一格）。"""
+    if enemy is None:
+        return False
+    key = getattr(enemy, "robot_id", None) or getattr(enemy, "id", "")
+    return wm.enemy_still.get(key, 0) >= _IDLE_TICKS
+
+
+def _identity_key(team, robot_id) -> tuple:
+    """(team, robot_id) 全序键。
+
+    只用 robot_id 比较是不够的：robot_id 是「队内编号」，对方同号（如我方 A1、
+    对方 B1 都是 1）时两者相等，无法打破对称。
+    """
+    return (str(team or ""), str(robot_id or ""))
+
+
+def _is_diag_adjacent(p: Perception, enemy) -> bool:
+    """敌车是否位于我方斜对角 1 格（|dx| == |dy| == 1）。"""
+    me = p.me
+    if me is None or me.position is None or enemy is None or enemy.position is None:
+        return False
+    dx = abs(enemy.position[0] - me.position[0])
+    dy = abs(enemy.position[1] - me.position[1])
+    return dx == 1 and dy == 1
+
+
 def _diag_axis_preference(p: Perception, enemy) -> Optional[str]:
-    """正对角线追击时的分轴偏好：按 robot_id 字典序，保证两台车选不同轴。
+    """正对角线追击时的分轴偏好：按 (team, robot_id) 全序，保证两台车选不同轴。
 
     若两台车都按同一规则选水平轴，会在斜对角上互相镜像绕圈（永不进入攻击线）。
     """
     me = p.me
     if me is None or enemy is None:
         return None
-    my_id = str(me.robot_id or me.team or "")
-    en_id = str(getattr(enemy, "robot_id", None) or getattr(enemy, "id", "") or "")
-    if not my_id or not en_id or my_id == en_id:
+    my_key = _identity_key(me.team, me.robot_id)
+    en_key = _identity_key(getattr(enemy, "team", None), getattr(enemy, "robot_id", None))
+    if not all(my_key) or not all(en_key) or my_key == en_key:
         return None
-    return "vertical" if my_id < en_id else "horizontal"
+    return "vertical" if my_key < en_key else "horizontal"
 
 
 def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
@@ -262,6 +311,10 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     # 站上资源格即视为已采集：从记忆移除，避免 patrol 反复瞄准脚下已空资源
     if me.position in wm.resources:
         wm.mark_resource_collected(me.position)
+
+    # 态势判定：低分进攻、高分防守；对方挂机则无视分差，转为主动刷伤害分
+    idle_enemy = _enemy_idle(wm, enemy)
+    defensive = (not idle_enemy) and _score_progress(p) >= _DEFEND_SCORE
 
     # ---- 1) 残血 / safe 模式 → 优先撤离或 DEFEND ----
     # safe 模式语义是「优先脱离威胁」（见 registry._strategy_safe 文档）：
@@ -283,7 +336,9 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
             return Intent(kind="defend", reason=f"safe-corned({hp})")
 
     # 普通模式残血：贴脸（敌在射程线内）先 DEFEND 抵消伤害，否则撤离
-    if not safe_mode and hp <= _FLEE_HP:
+    # 防守姿态（高分）下提高阈值：宁可少打一轮也要保住已有分数
+    flee_hp = _DEFEND_HP if defensive else _FLEE_HP
+    if not safe_mode and hp <= flee_hp:
         if enemy is not None and _line_of_fire(p, enemy):
             la = me.last_action
             # 上一 Tick 已 DEFEND 且血量未变 → 对手大概率也在防御（互相僵持），
@@ -316,6 +371,31 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
     # ---- 3) 追敌 / 游走 ----
     if enemy is not None:
+        # 防守姿态：得分已领先，不再主动追击（追回来打的每一轮都是换血风险），
+        # 交给常规任务/巡逻继续吃资源；敌车主动贴脸时上面的开火分支已经覆盖。
+        if defensive:
+            return _patrol(p, wm)
+        # 斜对角 1 格：此时无法攻击（攻击要求轴对齐直线），双方若同时沿轴
+        # 推进，只会「互换位置」（同轴）或「撞同一格」（不同轴），形成 2 Tick
+        # 永久死循环。用 (team, robot_id) 全序做不对称裁决：序号小的一方原地
+        # 等待，序号大的一方靠近；已成功推进过一格但仍保持对角的（说明对方也
+        # 在推进），本 Tick 也改为等待。这样每 Tick 至多一方移动，1–2 Tick
+        # 即可进入攻击线。对方挂机时不适用（它不会前进，等待只会空耗），
+        # 直接靠近刷分。
+        if _is_diag_adjacent(p, enemy):
+            la = me.last_action
+            if me.protected:
+                return Intent(kind="wait", reason="diag-protected")
+            my_key = _identity_key(me.team, me.robot_id)
+            en_key = _identity_key(getattr(enemy, "team", None), getattr(enemy, "robot_id", None))
+            advanced = la is not None and la.action == "move" and bool(la.moved)
+            if (advanced or my_key < en_key) and not idle_enemy:
+                return Intent(kind="wait", reason="diag-hold")
+            d = _step_toward(p, wm, enemy.position,
+                             axis_pref=_diag_axis_preference(p, enemy))
+            if d is not None:
+                return Intent(kind="move", direction=d, reason="diag-close")
+            return Intent(kind="wait", reason="diag-blocked")
         d = _step_toward(p, wm, enemy.position,
                          axis_pref=_diag_axis_preference(p, enemy))
         if d is not None:
