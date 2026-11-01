@@ -35,9 +35,9 @@ _RETREAT_RADIUS = 8    # 撤离目标搜索半径（只找附近安全格，避�
 # 态势参数（本地策略值，不影响协议合法性）
 _DEFEND_SCORE = 38.0   # 本队阶段二得分达到该值即转「防守」姿态（资源 30 + 对抗 15 = 45 满分）
 _DEFEND_HP = 45        # 防守姿态下的脱离阈值（比 _FLEE_HP 保守，优先保分而非换血）
-_IDLE_TICKS = 4        # 敌车连续 4 Tick 停在同一格 → 判定挂机
-_IDLE_FARM_HITS = 3    # 对同一挂机目标最多攻击 3 次（之后判罚机制不再计分，转去探索）
-_IDLE_FARM_RANGE = 3   # 只打附近的挂机车；更远的一律去探索收集资源
+_KILL_LEAVE_DIST = 5   # 击杀后至少拉开 5 格，把复活点甩到视野（±4）之外
+_KILL_LEAVE_TIMEOUT = 12  # 撤离最长持续时间（被地图边缘/障碍挡住时的兜底）
+_KILL_AVOID_TICKS = 30    # 击杀后这段时间内不把「复活点周边」当作资源/探索目标
 
 # 方向 → 位移（规则 §4.1：x 向右、y 向下）
 _DIR_VEC = {
@@ -258,34 +258,44 @@ def _score_progress(p: Perception) -> float:
     return res + dmg
 
 
-def _enemy_idle(wm: WorldModel, enemy) -> bool:
-    """敌车是否挂机（连续 _IDLE_TICKS 个 Tick 停在同一格）。"""
-    if enemy is None:
+def _chebyshev(a: XY, b: XY) -> int:
+    """棋盘距离：视野是 ±4 格的方形窗口，判断「是否还在视野内」必须用它。"""
+    return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+
+def _enemy_key(enemy) -> str:
+    return getattr(enemy, "robot_id", None) or getattr(enemy, "id", "") or ""
+
+
+def _in_avoid_zone(p: Perception, wm: WorldModel, xy: XY) -> bool:
+    """该格是否落在「刚击杀敌车的复活点周边」（撤离区内不主动回去）。"""
+    if wm.kill_point is None or xy is None:
         return False
-    key = getattr(enemy, "robot_id", None) or getattr(enemy, "id", "")
-    return wm.enemy_still.get(key, 0) >= _IDLE_TICKS
+    if p.tick - wm.kill_tick > _KILL_AVOID_TICKS:
+        return False
+    return _chebyshev(xy, wm.kill_point) < _KILL_LEAVE_DIST
 
 
-def _farm_allowed(wm: WorldModel, p: Perception, enemy) -> bool:
-    """挂机目标是否还值得打。
+def _leave_step(p: Perception, wm: WorldModel, point: XY) -> Optional[str]:
+    """朝远离 `point` 的方向走一步，尽量把该点甩出视野（±4 格）。
 
-    两个止损条件：对抗分已经刷满（effective_damage ≥ 500 后继续打不再加分）；
-    以及对同一目标的攻击次数已达 _IDLE_FARM_HITS（持续打同一个挂机车会触发
-    不计分的机制，不如把这部分 Tick 拿去做探索和资源采集）。
+    单纯的贪心最远格即可：撤离阶段只求尽快离开复活点，不需要绕障规划；
+    距离相同则沿用上一 Tick 的方向，避免在两个格之间来回摆。
     """
-    if enemy is None:
-        return False
-    sc = p.score
-    if sc is not None and float(sc.effective_damage) >= C.SCORE_STAGE2_DAMAGE_FULL:
-        return False
-    key = getattr(enemy, "robot_id", None) or getattr(enemy, "id", "")
-    return wm.farm_hits.get(key, 0) < _IDLE_FARM_HITS
-
-
-def _register_farm_hit(wm: WorldModel, enemy) -> None:
-    """记录一次对挂机目标的攻击（预算扣减）。"""
-    key = getattr(enemy, "robot_id", None) or getattr(enemy, "id", "")
-    wm.farm_hits[key] = wm.farm_hits.get(key, 0) + 1
+    me = p.me
+    if me.position is None:
+        return None
+    la = me.last_action
+    prev_dir = getattr(la, "effective_direction", None) if la is not None else None
+    best, best_d = None, -1
+    for d, (dx, dy) in _DIR_VEC.items():
+        nx = (me.position[0] + dx, me.position[1] + dy)
+        if not wm.is_free(nx):
+            continue
+        dist = _chebyshev(nx, point)
+        if dist > best_d or (dist == best_d and d == prev_dir):
+            best, best_d = d, dist
+    return best
 
 
 def _identity_key(team, robot_id) -> tuple:
@@ -332,14 +342,36 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     enemy = _enemy_near(p)
     hp = me.hp
 
+    # 刚被本方击杀过的敌车：KILL_IGNORE_TICKS 内不再主动去追（它大概率还停在
+    # 出生点挂机，追回来就等于回到「对同一个不动目标反复输出」的老路）。
+    # 只有它自己走进攻击线才还击，这种情况属于正常交战而不是刷分。
+    if (enemy is not None
+            and wm.ignore_until.get(_enemy_key(enemy), -1) > p.tick
+            and not _line_of_fire(p, enemy)):
+        enemy = None
+
     # 站上资源格即视为已采集：从记忆移除，避免 patrol 反复瞄准脚下已空资源
     if me.position in wm.resources:
         wm.mark_resource_collected(me.position)
 
-    # 态势判定：低分进攻、高分防守；对方挂机且仍可刷分时无视分差，主动刷伤害分
-    idle_enemy = _enemy_idle(wm, enemy)
-    farmable = idle_enemy and _farm_allowed(wm, p, enemy)
-    defensive = (not farmable) and _score_progress(p) >= _DEFEND_SCORE
+    # 态势判定：低分进攻、高分防守（挂机刷分已废弃，见 _detect_kill 的说明）
+    defensive = _score_progress(p) >= _DEFEND_SCORE
+
+    # ---- 1.5) 刚击杀出生点的敌车 → 立刻撤离，把复活点甩出视野 ----
+    # 对方 3 Tick 后在出生点复活，原地继续输出同一个位置会触发「反复打不动目标」
+    # 的不计分机制，所以击杀后直接拉开 _KILL_LEAVE_DIST 格；随后在
+    # _KILL_AVOID_TICKS 内也不再把它周边当作资源/探索目标（见 _patrol）。
+    if wm.kill_point is not None:
+        if p.tick - wm.kill_tick > _KILL_AVOID_TICKS:
+            wm.kill_point = None          # 撤离窗口结束，恢复正常规划
+        else:
+            far = _chebyshev(me.position, wm.kill_point) >= _KILL_LEAVE_DIST
+            expired = p.tick - wm.kill_tick > _KILL_LEAVE_TIMEOUT
+            if not (far or expired):
+                d = _leave_step(p, wm, wm.kill_point)
+                if d is not None:
+                    return Intent(kind="move", direction=d, reason="kill-leave")
+                return Intent(kind="wait", reason="kill-leave-blocked")
 
     # ---- 1) 残血 / safe 模式 → 优先撤离或 DEFEND ----
     # safe 模式语义是「优先脱离威胁」（见 registry._strategy_safe 文档）：
@@ -386,29 +418,16 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
     # ---- 2) 交战逻辑 ----
     if enemy is not None and _line_of_fire(p, enemy):
-        # 挂机目标的刷分预算已用完：继续打不加分，本 Tick 起让位给探索/采集
-        if idle_enemy and not farmable:
-            return _patrol(p, wm)
         # 出生保护中的攻击者不能 ATTACK（规则 §6.2）
         if me.protected:
             d = _flee_direction(p, wm)
             if d is not None:
                 return Intent(kind="move", direction=d, reason="protected-no-attack")
             return Intent(kind="defend", reason="protected-no-attack")
-        if farmable:
-            # 刷分要计预算：对同一挂机目标打满 _IDLE_FARM_HITS 次后就收手
-            _register_farm_hit(wm, enemy)
         return Intent(kind="attack", direction=_attack_direction(p, enemy), reason="engage")
 
     # ---- 3) 追敌 / 游走 ----
     if enemy is not None:
-        # 挂机目标的刷分预算已用完（继续打也不加分）→ 立刻转去探索/收集资源，
-        # 不要在一个已经刷不出分的尸体位/挂机位上来回踱步。
-        if idle_enemy and not farmable:
-            return _patrol(p, wm)
-        # 挂机但离得远：跨图赶过去打一个不会动的目标不划算，优先铺开探图吃资源
-        if farmable and manhattan(me.position, enemy.position) > _IDLE_FARM_RANGE:
-            return _patrol(p, wm)
         # 防守姿态：得分已领先，不再主动追击（追回来打的每一轮都是换血风险），
         # 交给常规任务/巡逻继续吃资源；敌车主动贴脸时上面的开火分支已经覆盖。
         if defensive:
@@ -418,8 +437,7 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
         # 永久死循环。用 (team, robot_id) 全序做不对称裁决：序号小的一方原地
         # 等待，序号大的一方靠近；已成功推进过一格但仍保持对角的（说明对方也
         # 在推进），本 Tick 也改为等待。这样每 Tick 至多一方移动，1–2 Tick
-        # 即可进入攻击线。对方挂机且仍在刷分预算内时不适用（它不会前进，
-        # 等待只会空耗），直接靠近刷分。
+        # 即可进入攻击线。
         if _is_diag_adjacent(p, enemy):
             la = me.last_action
             if me.protected:
@@ -427,7 +445,7 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
             my_key = _identity_key(me.team, me.robot_id)
             en_key = _identity_key(getattr(enemy, "team", None), getattr(enemy, "robot_id", None))
             advanced = la is not None and la.action == "move" and bool(la.moved)
-            if (advanced or my_key < en_key) and not farmable:
+            if advanced or my_key < en_key:
                 return Intent(kind="wait", reason="diag-hold")
             d = _step_toward(p, wm, enemy.position,
                              axis_pref=_diag_axis_preference(p, enemy))
@@ -456,16 +474,19 @@ def _patrol(p: Perception, wm: WorldModel) -> Intent:
                 (abs(target[0] - me.position[0]) + abs(target[1] - me.position[1])):
             target = (tx, ty)
     if target is None:
-        res = wm.nearest_resource(me.position, high_first=True)
+        res = wm.nearest_resource(me.position, high_first=True,
+                                  skip=lambda xy: _in_avoid_zone(p, wm, xy))
         if res is not None and res.position is not None:
             target = res.position
     if target is None:
         # 视野只有 ±4 格，没有已知资源时不能原地等：先往地图中心走，到了再铺开探索
         center = (p.map_w // 2, p.map_h // 2)
-        if center != me.position and center not in wm.visited and wm.is_free(center):
+        if (center != me.position and center not in wm.visited
+                and wm.is_free(center) and not _in_avoid_zone(p, wm, center)):
             target = center
         else:
-            target = wm.explore_target(me.position)
+            target = wm.explore_target(me.position,
+                                       skip=lambda xy: _in_avoid_zone(p, wm, xy))
     if target is None:
         target = (p.map_w // 2, p.map_h // 2)
     # 已经站在游走目标上：原地等待，避免「离开一格又回来」的 2 格永久振荡
