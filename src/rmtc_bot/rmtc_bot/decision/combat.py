@@ -29,7 +29,6 @@ _ENGAGE_RANGE = 2      # 攻击射程（直线 1–2 格；已进入射程即开
 _SCAN_RANGE = 4        # 索敌扫描半径（视野内 ±4 格）
 _FLEE_HP = 15          # HP 低于该值强制撤离
 _SAFE_MODE_HP = 40     # safe 模式触发撤离的 HP 阈值
-_LOW_SCORE = 25        # 第二阶段总分低于该值时转入「避战发育」
 _RETREAT_RADIUS = 8    # 撤离目标搜索半径（只找附近安全格，避免跨全图逃跑）
 
 # 方向 → 位移（规则 §4.1：x 向右、y 向下）
@@ -39,8 +38,6 @@ _DIR_VEC = {
     "left": (-1, 0),
     "right": (1, 0),
 }
-
-_OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
 
 def _enemy_near(p: Perception) -> Optional[object]:
@@ -89,34 +86,6 @@ def _attack_direction(p: Perception, enemy) -> Optional[str]:
     return "down" if dy > 0 else "up"
 
 
-def _diagonal_adjacent(p: Perception, enemy) -> bool:
-    """敌方是否在斜对角相邻格（|dx|==|dy|==1，双方都无法攻击对方）。"""
-    me = p.me
-    if me is None or me.position is None or enemy is None or enemy.position is None:
-        return False
-    dx = enemy.position[0] - me.position[0]
-    dy = enemy.position[1] - me.position[1]
-    return abs(dx) == 1 and abs(dy) == 1
-
-
-def _align_step(p: Perception, wm: WorldModel, enemy) -> Optional[str]:
-    """斜对角时迈入「与敌同轴」的相邻格（下一步即可攻击），无可用格返回 None。"""
-    me = p.me
-    if me is None or me.position is None or enemy is None or enemy.position is None:
-        return None
-    ex, ey = enemy.position
-    x, y = me.position
-    cands = []
-    if ey != y:
-        cands.append("down" if ey > y else "up")
-    if ex != x:
-        cands.append("right" if ex > x else "left")
-    for d in cands:
-        if _free_step(wm, me.position, d):
-            return d
-    return None
-
-
 def _free_step(wm: WorldModel, src, direction: str) -> bool:
     """该方向下一格是否为本地已知可达格（界内且非已知障碍）。"""
     dx, dy = _DIR_VEC[direction]
@@ -159,19 +128,7 @@ def _step_toward(p: Perception, wm: WorldModel, target,
     me = p.me
     assert me is not None and me.position is not None
     order = _candidates_toward(p, target, axis_pref)
-    d = wm.next_step(me.position, tuple(target), order)
-    # 防「原地来回走」：若第一步就是退回上一格，在等长最短路中换一个方向。
-    # BFS 只保证路程长度，枚举顺序只影响同长路径的取舍；障碍多、目标被挡时
-    # 两条等长路径会随位置在正反方向间交替，表现为两格无限往返。
-    la = me.last_action
-    if d is not None and la is not None and la.moved and la.effective_direction in _OPPOSITE:
-        back = _OPPOSITE[la.effective_direction]
-        if d == back:
-            alt = wm.next_step(me.position, tuple(target),
-                               [x for x in order if x != back] + [back])
-            if alt is not None:
-                d = alt
-    return d
+    return wm.next_step(me.position, tuple(target), order)
 
 
 def _nearest_known_enemy(p: Perception, wm: WorldModel):
@@ -301,9 +258,6 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
 
     enemy = _enemy_near(p)
     hp = me.hp
-    total = p.score.total(2)
-    # 低分发育：总分低时资源分（30）远高于对抗分（15），不主动交战、先攒资源
-    low_score = total < _LOW_SCORE
 
     # 站上资源格即视为已采集：从记忆移除，避免 patrol 反复瞄准脚下已空资源
     if me.position in wm.resources:
@@ -350,24 +304,6 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
             return Intent(kind="defend", reason=f"flee-blocked({hp})")
         # 无近敌 → 继续常规任务/巡逻（不为了看不见的敌人原地打转）
 
-    # ---- 1.5) 低分发育：不主动交战，优先收集资源（规则 §10.2 资源分收益最高） ----
-    if low_score:
-        if enemy is not None and _line_of_fire(p, enemy):
-            # 已进入敌方射程：先脱离，退无可退才 DEFEND（受击 20→10）
-            d = _retreat_step(p, wm, enemy) or _flee_direction(p, wm)
-            if d is not None:
-                return Intent(kind="move", direction=d, reason=f"lowscore-away({total:.0f})")
-            if me.protected:
-                return Intent(kind="defend", reason=f"lowscore-protected({total:.0f})")
-            # 上一 Tick 已 DEFEND 且血量未变 → 对方未开火，转为开火打破互防僵局
-            la = me.last_action
-            if la is not None and la.action == "defend" and wm.prev_hp == hp:
-                return Intent(kind="attack", direction=_attack_direction(p, enemy),
-                              reason=f"lowscore-break({total:.0f})")
-            return Intent(kind="defend", reason=f"lowscore-defend({total:.0f})")
-        # 未进射程 → 不追敌，直接去资源
-        return _patrol(p, wm, resource_first=True)
-
     # ---- 2) 交战逻辑 ----
     if enemy is not None and _line_of_fire(p, enemy):
         # 出生保护中的攻击者不能 ATTACK（规则 §6.2）
@@ -377,18 +313,6 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
                 return Intent(kind="move", direction=d, reason="protected-no-attack")
             return Intent(kind="defend", reason="protected-no-attack")
         return Intent(kind="attack", direction=_attack_direction(p, enemy), reason="engage")
-
-    # ---- 2.5) 斜对角贴脸：不镜像推进（双方同速斜走会卡在相邻两格来回震荡）----
-    # 先 DEFEND 卡位，让对方必须迈入直线（此时它进入我方射程）；
-    # 若对方也不动（血量未变），则主动迈一步进入直线，下一 Tick 即可开火。
-    if enemy is not None and _diagonal_adjacent(p, enemy):
-        la = me.last_action
-        if la is not None and la.action == "defend" and wm.prev_hp == hp:
-            d = _align_step(p, wm, enemy)
-            if d is not None:
-                return Intent(kind="move", direction=d, reason="diag-align")
-            return Intent(kind="defend", reason="diag-blocked")
-        return Intent(kind="defend", reason="diag-hold")
 
     # ---- 3) 追敌 / 游走 ----
     if enemy is not None:
@@ -402,25 +326,17 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     return _patrol(p, wm)
 
 
-def _patrol(p: Perception, wm: WorldModel, resource_first: bool = False) -> Intent:
-    """无敌人时的游走：未完成任务点 → 已知资源 → 地图中心。
-
-    resource_first=True（低分发育）：先找资源（价值/距离比最优），再做任务点。
-    """
+def _patrol(p: Perception, wm: WorldModel) -> Intent:
+    """无敌人时的游走：未完成任务点 → 已知资源 → 地图中心。"""
     me = p.me
     assert me is not None and me.position is not None
     target = None
-    if resource_first:
-        res = wm.nearest_resource(me.position, high_first=True)
-        if res is not None and res.position is not None:
-            target = res.position
-    if target is None:
-        for tx, ty in wm.mission_points:
-            if wm.mission_done.get((tx, ty), False):
-                continue
-            if target is None or (abs(tx - me.position[0]) + abs(ty - me.position[1])) < \
-                    (abs(target[0] - me.position[0]) + abs(target[1] - me.position[1])):
-                target = (tx, ty)
+    for tx, ty in wm.mission_points:
+        if wm.mission_done.get((tx, ty), False):
+            continue
+        if target is None or (abs(tx - me.position[0]) + abs(ty - me.position[1])) < \
+                (abs(target[0] - me.position[0]) + abs(target[1] - me.position[1])):
+            target = (tx, ty)
     if target is None:
         res = wm.nearest_resource(me.position, high_first=True)
         if res is not None and res.position is not None:
