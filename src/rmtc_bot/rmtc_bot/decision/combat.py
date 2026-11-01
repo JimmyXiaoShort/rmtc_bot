@@ -38,6 +38,7 @@ _DEFEND_HP = 45        # 防守姿态下的脱离阈值（比 _FLEE_HP 保守，
 _KILL_LEAVE_DIST = 5   # 击杀后至少拉开 5 格，把复活点甩到视野（±4）之外
 _KILL_LEAVE_TIMEOUT = 12  # 撤离最长持续时间（被地图边缘/障碍挡住时的兜底）
 _KILL_AVOID_TICKS = 30    # 击杀后这段时间内不把「复活点周边」当作资源/探索目标
+_IDLE_TICKS = 8        # 敌车连续 8 Tick 同格 → 视为挂机，不再主动贴上去（见 _enemy_near）
 
 # 方向 → 位移（规则 §4.1：x 向右、y 向下）
 _DIR_VEC = {
@@ -48,8 +49,13 @@ _DIR_VEC = {
 }
 
 
-def _enemy_near(p: Perception) -> Optional[object]:
-    """返回视野内最近的存活敌车（RobotEntity 或 None）。"""
+def _enemy_near(p: Perception, wm: Optional[WorldModel] = None) -> Optional[object]:
+    """返回视野内最近的存活敌车（RobotEntity 或 None）。
+
+    挂机（连续 _IDLE_TICKS 个 Tick 停在同一格）且不在攻击线内的敌车不参与索敌：
+    贴上去只会重复「对着不动的目标输出」，还会把车卡在斜对角上一直 WAIT。
+    它若已经站在攻击线内则照常还击——那属于正常交战，不是主动刷分。
+    """
     best = None
     best_d2 = float("inf")
     me = p.me
@@ -58,6 +64,8 @@ def _enemy_near(p: Perception) -> Optional[object]:
     x, y = me.position
     for r in p.robots:
         if r.position is None:
+            continue
+        if wm is not None and _enemy_idle(wm, r) and not _line_of_fire(p, r):
             continue
         d2 = (r.position[0] - x) ** 2 + (r.position[1] - y) ** 2
         if d2 <= _SCAN_RANGE ** 2 and d2 < best_d2:
@@ -267,6 +275,13 @@ def _enemy_key(enemy) -> str:
     return getattr(enemy, "robot_id", None) or getattr(enemy, "id", "") or ""
 
 
+def _enemy_idle(wm: WorldModel, enemy) -> bool:
+    """敌车是否挂机（连续 _IDLE_TICKS 个 Tick 停在同一格）。"""
+    if enemy is None:
+        return False
+    return wm.enemy_still.get(_enemy_key(enemy), 0) >= _IDLE_TICKS
+
+
 def _in_avoid_zone(p: Perception, wm: WorldModel, xy: XY) -> bool:
     """该格是否落在「刚击杀敌车的复活点周边」（撤离区内不主动回去）。"""
     if wm.kill_point is None or xy is None:
@@ -339,7 +354,7 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
     if me is None or me.position is None:
         return Intent(kind="wait", reason="no-self")
 
-    enemy = _enemy_near(p)
+    enemy = _enemy_near(p, wm)
     hp = me.hp
 
     # 刚被本方击杀过的敌车：KILL_IGNORE_TICKS 内不再主动去追（它大概率还停在
@@ -445,8 +460,13 @@ def decide_combat(p: Perception, ctx, safe_mode: bool = False) -> Intent:
             my_key = _identity_key(me.team, me.robot_id)
             en_key = _identity_key(getattr(enemy, "team", None), getattr(enemy, "robot_id", None))
             advanced = la is not None and la.action == "move" and bool(la.moved)
-            if advanced or my_key < en_key:
+            # 「让一拍」最多连做 2 次：若对方是被卡住/挂机的车，它永远不会靠近，
+            # 无限等待会让本车卡在斜对角上连旁边的资源都不去收（死锁）。
+            held = wm.diag_holds if (la is not None and la.action == "wait") else 0
+            if (advanced or my_key < en_key) and held < 2:
+                wm.diag_holds = held + 1
                 return Intent(kind="wait", reason="diag-hold")
+            wm.diag_holds = 0
             d = _step_toward(p, wm, enemy.position,
                              axis_pref=_diag_axis_preference(p, enemy))
             if d is not None:

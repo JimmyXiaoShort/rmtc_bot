@@ -59,6 +59,8 @@ class WorldModel:
         self.obstacles: Dict[XY, Obstacle] = {}
         self.resources: Dict[XY, ResourceEntity] = {}
         self.enemies: Dict[str, RobotEntity] = {}      # 以 robot_id 为键
+        self.enemy_still: Dict[str, int] = {}          # 敌车「连续同格」计数（识别挂机）
+        self.diag_holds: int = 0                       # 斜对角让拍次数（防止无限等待）
         # 击杀撤离状态：刚打死的敌车位置 + 击杀发生的 Tick（见 combat._leave_step）
         self.kill_point: Optional[XY] = None
         self.kill_tick: int = -1
@@ -99,6 +101,8 @@ class WorldModel:
         self.obstacles.clear()
         self.resources.clear()
         self.enemies.clear()
+        self.enemy_still.clear()
+        self.diag_holds = 0
         self.kill_point = None
         self.kill_tick = -1
         self.ignore_until.clear()
@@ -158,6 +162,11 @@ class WorldModel:
         seen_now = {rb.robot_id or rb.id for rb in p.robots}
         for rb in p.robots:
             key = rb.robot_id or rb.id
+            prev = self.enemies.get(key)
+            if prev is not None and prev.position == rb.position:
+                self.enemy_still[key] = self.enemy_still.get(key, 0) + 1
+            else:
+                self.enemy_still[key] = 0
             self.enemies[key] = RobotEntity(
                 id=rb.id, team=rb.team, robot_id=rb.robot_id, position=rb.position,
                 hp=rb.hp, protected=rb.protected,
@@ -214,6 +223,7 @@ class WorldModel:
         ]
         for k in stale_enemies:
             del self.enemies[k]
+            self.enemy_still.pop(k, None)
 
         stale_res = [
             k for k, r in self.resources.items()
