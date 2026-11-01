@@ -57,6 +57,7 @@ class WorldModel:
         self.resources: Dict[XY, ResourceEntity] = {}
         self.enemies: Dict[str, RobotEntity] = {}      # 以 robot_id 为键
         self.enemy_still: Dict[str, int] = {}          # 敌车「连续同格」计数（识别挂机）
+        self.farm_hits: Dict[str, int] = {}            # 对同一挂机目标的累计攻击次数（刷分预算）
         self.visited: Set[XY] = set()                  # 本车已到过的格（用于探索）
         self.mission_points: Set[XY] = set()           # 任务坐标（来自感知 missions 的 reach 型）
         self.mission_done: Dict[XY, bool] = {}         # 任务坐标是否已完成
@@ -93,6 +94,7 @@ class WorldModel:
         self.resources.clear()
         self.enemies.clear()
         self.enemy_still.clear()
+        self.farm_hits.clear()
         self.visited.clear()
         self.mission_points.clear()
         self.mission_done.clear()
@@ -152,7 +154,9 @@ class WorldModel:
             if prev is not None and prev.position == rb.position:
                 self.enemy_still[key] = self.enemy_still.get(key, 0) + 1
             else:
+                # 位置变化 → 新的「停留回合」，刷分预算重新计数
                 self.enemy_still[key] = 0
+                self.farm_hits.pop(key, None)
             self.enemies[key] = RobotEntity(
                 id=rb.id, team=rb.team, robot_id=rb.robot_id, position=rb.position,
                 hp=rb.hp, protected=rb.protected,
@@ -184,6 +188,7 @@ class WorldModel:
         for k in stale_enemies:
             del self.enemies[k]
             self.enemy_still.pop(k, None)
+            self.farm_hits.pop(k, None)
 
         stale_res = [
             k for k, r in self.resources.items()
@@ -262,6 +267,30 @@ class WorldModel:
             # 仅按距离选择
             return min(self.resources.values(), key=lambda r: manhattan(from_xy, r.position))
         return best
+
+    def explore_target(self, from_xy: XY) -> Optional[XY]:
+        """返回最近的「未探索且可走」格，用于无资源/无任务时铺开探索。
+
+        BFS 从当前位置由近及远扩散，遇到第一个 visited 集合之外的格即返回；
+        全图已探索（或地图尺寸未知）返回 None，由调用方回退到地图中心。
+        视野是 ±4 格，只有走过去才能看到新资源，所以必须主动铺开而不是原地等。
+        """
+        if self.map_w <= 0 or self.map_h <= 0:
+            return None
+        step_vec = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
+        queue = deque([from_xy])
+        seen = {from_xy}
+        while queue:
+            cur = queue.popleft()
+            for d in ("up", "down", "left", "right"):
+                nx = (cur[0] + step_vec[d][0], cur[1] + step_vec[d][1])
+                if nx in seen or not self.is_free(nx):
+                    continue
+                if nx not in self.visited:
+                    return nx
+                seen.add(nx)
+                queue.append(nx)
+        return None
 
     def mark_resource_collected(self, xy: XY) -> None:
         """资源被收集后从记忆移除（本场不刷新）。"""
